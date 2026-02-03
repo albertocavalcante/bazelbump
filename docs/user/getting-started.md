@@ -12,22 +12,67 @@ bazelbump detects breaking changes when upgrading Bazel versions. It scans your 
 
 ## Installation
 
-### From Source
+### Quick Setup (recommended)
 
 ```bash
 git clone https://github.com/albertocavalcante/bazelbump.git
 cd bazelbump
+just setup  # Downloads flag data and installs bazelbump
+```
 
-# Sync flag database (required)
+This:
+1. Downloads the flag database from registry.build
+2. Installs `bazelbump` to `$GOPATH/bin`
+
+### Alternative Installation Methods
+
+#### Install to ~/.local/bin
+
+If you don't use `$GOPATH`:
+
+```bash
+git clone https://github.com/albertocavalcante/bazelbump.git
+cd bazelbump
 just sync-flags
+just install-local
+```
 
-# Install to $GOPATH/bin
-just install
+Add `~/.local/bin` to your PATH if needed:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+#### System-wide Install
+
+```bash
+git clone https://github.com/albertocavalcante/bazelbump.git
+cd bazelbump
+just sync-flags
+just install-system  # Installs to /usr/local/bin (requires sudo)
+```
+
+#### Manual Build
+
+```bash
+git clone https://github.com/albertocavalcante/bazelbump.git
+cd bazelbump
+just sync-flags
+go build -o bazelbump ./cmd/bazelbump
+./bazelbump --help
 ```
 
 ### Pre-built Binaries
 
 Download from [GitHub Releases](https://github.com/albertocavalcante/bazelbump/releases).
+
+### Verify Installation
+
+```bash
+bazelbump version
+# bazelbump dev (commit: unknown, built: unknown)
+```
 
 ## Quick Start
 

@@ -18,9 +18,58 @@ build:
 build-cli:
     go build -o bin/bazelbump ./cmd/bazelbump
 
-# Install CLI to $GOPATH/bin
+# === INSTALL ===
+
+# Install CLI to $GOPATH/bin (recommended)
 install:
+    @echo "Installing bazelbump to \$GOPATH/bin..."
     go install ./cmd/bazelbump
+    @echo "✓ Installed! Make sure \$GOPATH/bin is in your PATH"
+    @echo "  Run: bazelbump --help"
+
+# Install CLI to ~/.local/bin (no GOPATH needed)
+install-local:
+    #!/usr/bin/env bash
+    mkdir -p ~/.local/bin
+    echo "Building bazelbump..."
+    go build -o ~/.local/bin/bazelbump ./cmd/bazelbump
+    echo "✓ Installed to ~/.local/bin/bazelbump"
+    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+        echo ""
+        echo "⚠ Add ~/.local/bin to your PATH:"
+        echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
+        echo "  source ~/.bashrc"
+    fi
+    echo ""
+    echo "Run: bazelbump --help"
+
+# Install to /usr/local/bin (requires sudo)
+install-system:
+    #!/usr/bin/env bash
+    echo "Building bazelbump..."
+    go build -o /tmp/bazelbump ./cmd/bazelbump
+    echo "Installing to /usr/local/bin (requires sudo)..."
+    sudo mv /tmp/bazelbump /usr/local/bin/
+    echo "✓ Installed to /usr/local/bin/bazelbump"
+    echo ""
+    echo "Run: bazelbump --help"
+
+# Uninstall from common locations
+uninstall:
+    #!/usr/bin/env bash
+    echo "Removing bazelbump..."
+    rm -f "$GOPATH/bin/bazelbump" 2>/dev/null && echo "  Removed from \$GOPATH/bin"
+    rm -f "$HOME/.local/bin/bazelbump" 2>/dev/null && echo "  Removed from ~/.local/bin"
+    rm -f ./bin/bazelbump 2>/dev/null && echo "  Removed from ./bin"
+    echo "✓ Done"
+    echo ""
+    echo "Note: /usr/local/bin/bazelbump requires: sudo rm /usr/local/bin/bazelbump"
+
+# Quick setup: sync flags and install
+setup: sync-flags install
+    @echo ""
+    @echo "✓ Setup complete! Try:"
+    @echo "  bazelbump analyze --to 9.0.0"
 
 # === TEST ===
 

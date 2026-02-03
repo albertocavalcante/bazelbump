@@ -14,18 +14,46 @@ Upgrading Bazel is tedious. Breaking changes are scattered across release notes,
 - **Migration Recipes** - Automate complex upgrades with Starlark-based recipes
 - **CI Ready** - JSON output and meaningful exit codes for automation
 
+## Installation
+
+### Quick Install (recommended)
+
+```bash
+git clone https://github.com/albertocavalcante/bazelbump.git
+cd bazelbump
+just setup  # Syncs flag data and installs to $GOPATH/bin
+```
+
+### Alternative Install Methods
+
+```bash
+# Install to ~/.local/bin (no GOPATH needed)
+just install-local
+
+# Install to /usr/local/bin (system-wide)
+just install-system
+
+# Manual build
+go build -o bazelbump ./cmd/bazelbump
+```
+
+### Pre-built Binaries
+
+Download from [GitHub Releases](https://github.com/albertocavalcante/bazelbump/releases).
+
 ## Quick Start
 
 ```bash
-# Install
-git clone https://github.com/albertocavalcante/bazelbump.git
-cd bazelbump
-just sync-flags  # Download flag database
-just install     # Install to $GOPATH/bin
-
-# Analyze your project
+# Analyze your project for Bazel 9.0 upgrade
 cd /path/to/your/project
 bazelbump analyze --to 9.0.0
+
+# Apply automatic fixes
+bazelbump apply --to 9.0.0 --dry-run  # Preview
+bazelbump apply --to 9.0.0            # Apply
+
+# Run migration recipes
+bazelbump recipe run --dry-run autoload-migration
 ```
 
 Example output:
