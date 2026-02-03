@@ -90,7 +90,25 @@ For projects this large, users need:
 | JSON files | Simple, no deps | No ACID, hard to query | ❌ |
 | BoltDB | Pure Go, embedded | Less familiar, no SQL | ❌ |
 
-We use `modernc.org/sqlite` (pure Go, no CGO) to maintain cross-platform builds.
+**IMPORTANT: No CGO Required**
+
+We use [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite) - a **pure Go** SQLite implementation:
+
+- ❌ **No CGO** - Cross-compiles to all Go targets (darwin, linux, windows, arm64, etc.)
+- ✅ **Battle-tested** - Used by Gogs in production for 2+ years
+- ✅ **Actively maintained** - Updated to SQLite 3.49.0 (Feb 2025)
+- ⚡ **Fast enough** - ~2x slower than CGO version, but <50ms for our checkpoint operations
+
+```go
+import (
+    "database/sql"
+    _ "modernc.org/sqlite"  // Pure Go, no CGO!
+)
+
+db, err := sql.Open("sqlite", ".bazelbump/state.db")
+```
+
+This aligns with our **airgap-first** philosophy - single binary, no system dependencies.
 
 ### 2.3 Database Schema
 
