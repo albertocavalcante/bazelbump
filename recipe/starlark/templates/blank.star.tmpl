@@ -1,0 +1,40 @@
+# {{.Name}} - {{.Description}}
+#
+# Usage:
+#   bazelbump recipe run {{.FileName}} --dry-run
+#   bazelbump recipe run {{.FileName}}
+
+recipe(
+    name = "{{.Name}}",
+    version = "1.0.0",
+    description = "{{.Description}}",
+    steps = [
+        # Add your steps here:
+        #
+        # scan(
+        #     id = "detect",
+        #     name = "Detect patterns",
+        #     files = ["BUILD", "BUILD.bazel"],
+        #     patterns = [r"pattern_to_find"],
+        # ),
+        #
+        # edit(
+        #     id = "transform",
+        #     name = "Apply transformations",
+        #     depends_on = ["detect"],
+        #     operations = [
+        #         # ensure_load("rule", "@repo//path:defs.bzl"),
+        #         # remove_flag("flag_name"),
+        #         # replace_text(old="old", new="new", files=["*.bzl"]),
+        #     ],
+        # ),
+        #
+        # verify(
+        #     id = "verify",
+        #     name = "Verify build",
+        #     depends_on = ["transform"],
+        #     command = "bazel build //...",
+        #     allow_failure = True,
+        # ),
+    ],
+)

@@ -449,6 +449,40 @@ type FileChange struct {
 
 	// Description explains what change was made.
 	Description string
+
+	// Hunks contains line-level change information for diff display.
+	// Populated during execution for detailed diff output.
+	Hunks []Hunk
+}
+
+// Hunk represents a contiguous block of changes in a file.
+type Hunk struct {
+	// OldStart is the starting line number in the old content (1-based).
+	OldStart int `json:"old_start"`
+
+	// OldCount is the number of lines from old content in this hunk.
+	OldCount int `json:"old_count"`
+
+	// NewStart is the starting line number in the new content (1-based).
+	NewStart int `json:"new_start"`
+
+	// NewCount is the number of lines in new content for this hunk.
+	NewCount int `json:"new_count"`
+
+	// Lines contains the individual line changes in this hunk.
+	Lines []LineDiff `json:"lines"`
+}
+
+// LineDiff represents a single line change within a hunk.
+type LineDiff struct {
+	// Type is "add", "remove", or "context".
+	Type string `json:"type"`
+
+	// LineNo is the line number (in old file for remove/context, new file for add).
+	LineNo int `json:"line"`
+
+	// Content is the line content (without newline).
+	Content string `json:"content"`
 }
 
 // Logger provides logging functions for recipe execution.

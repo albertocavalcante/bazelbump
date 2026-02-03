@@ -1,0 +1,66 @@
+# {{.Name}} - {{.Description}}
+#
+# This recipe adds load() statements for native rules that will require
+# explicit loading in future Bazel versions. It also ensures the required
+# bazel_dep entries are present in MODULE.bazel.
+#
+# Usage:
+#   bazelbump recipe run {{.FileName}} --dry-run
+#   bazelbump recipe run {{.FileName}}
+
+recipe(
+    name = "{{.Name}}",
+    version = "1.0.0",
+    description = "{{.Description}}",
+    steps = [
+        # Step 1: Detect native rule usage
+        scan(
+            id = "detect-native-rules",
+            name = "Detect native rule usage",
+            files = ["BUILD", "BUILD.bazel"],
+            patterns = [
+                # Add patterns to detect rules that need load statements:
+                r"cc_(binary|library|test)\s*\(",
+                r"java_(binary|library|test)\s*\(",
+                r"py_(binary|library|test)\s*\(",
+            ],
+        ),
+
+        # Step 2: Add required module dependencies
+        edit(
+            id = "add-module-deps",
+            name = "Add bazel_dep entries to MODULE.bazel",
+            depends_on = ["detect-native-rules"],
+            operations = [
+                # Add the rules_* dependencies you need:
+                ensure_bazel_dep("rules_cc", "0.1.1"),
+                ensure_bazel_dep("rules_java", "8.6.3"),
+                ensure_bazel_dep("rules_python", "1.4.1"),
+            ],
+        ),
+
+        # Step 3: Add load statements to BUILD files
+        edit(
+            id = "add-load-statements",
+            name = "Add load statements for native rules",
+            depends_on = ["add-module-deps"],
+            operations = [
+                # CC rules
+                ensure_load("cc_binary", "@rules_cc//cc:defs.bzl"),
+                ensure_load("cc_library", "@rules_cc//cc:defs.bzl"),
+                ensure_load("cc_test", "@rules_cc//cc:defs.bzl"),
+
+                # Java rules
+                ensure_load("java_binary", "@rules_java//java:defs.bzl"),
+                ensure_load("java_library", "@rules_java//java:defs.bzl"),
+                ensure_load("java_test", "@rules_java//java:defs.bzl"),
+
+                # Python rules
+                ensure_load("py_binary", "@rules_python//python:defs.bzl"),
+                ensure_load("py_library", "@rules_python//python:defs.bzl"),
+                ensure_load("py_test", "@rules_python//python:defs.bzl"),
+            ],
+        ),
+    ],
+    on_failure = "rollback",
+)

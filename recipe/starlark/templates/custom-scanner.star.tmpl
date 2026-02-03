@@ -1,0 +1,82 @@
+# {{.Name}} - {{.Description}}
+#
+# This recipe demonstrates custom scanning and transformation logic.
+# Use this template when you need more control over the migration process.
+#
+# Usage:
+#   bazelbump recipe run {{.FileName}} --dry-run
+#   bazelbump recipe run {{.FileName}}
+
+# Custom scan implementation
+def find_patterns(ctx):
+    """
+    Custom scanner that returns a list of matches.
+
+    Each match should be a dict with:
+      - file: path to the file
+      - line: line number (1-based)
+      - text: matched text
+      - rule: (optional) rule name if applicable
+    """
+    matches = []
+
+    # Example: find all files matching a pattern
+    files = glob(["**/BUILD", "**/BUILD.bazel"])
+
+    for f in files:
+        content = read_file(f)
+        # Add your custom detection logic here
+        # Example: if "deprecated_rule" in content:
+        #     matches.append({"file": f, "line": 1, "text": "deprecated_rule"})
+        pass
+
+    return matches
+
+# Custom transform implementation
+def apply_transforms(ctx):
+    """
+    Custom transform that returns a list of operations.
+
+    This function has access to:
+      - ctx.outputs["detect-patterns"]: results from the scan step
+      - ctx.project_path: root directory of the project
+      - ctx.dry_run: whether this is a dry run
+    """
+    ops = []
+
+    # Access scan results
+    scan_results = ctx.outputs.get("detect-patterns", {"matches": []})
+
+    for match in scan_results.get("matches", []):
+        # Add your custom transformation logic here
+        # Example: ops.append(replace_text(
+        #     old = match["text"],
+        #     new = "replacement_text",
+        #     files = [match["file"]],
+        # ))
+        pass
+
+    return ops
+
+recipe(
+    name = "{{.Name}}",
+    version = "1.0.0",
+    description = "{{.Description}}",
+    steps = [
+        # Step 1: Custom scan
+        scan(
+            id = "detect-patterns",
+            name = "Detect patterns with custom logic",
+            impl = find_patterns,
+        ),
+
+        # Step 2: Apply transforms
+        edit(
+            id = "apply-transforms",
+            name = "Apply custom transformations",
+            depends_on = ["detect-patterns"],
+            operations = apply_transforms,
+        ),
+    ],
+    on_failure = "rollback",
+)

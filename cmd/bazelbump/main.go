@@ -897,6 +897,12 @@ func runRecipe(args []string) error {
 		return runRecipeShow(subargs)
 	case "run":
 		return runRecipeRun(subargs)
+	case "init":
+		return runRecipeInit(subargs)
+	case "validate":
+		return runRecipeValidate(subargs)
+	case "builtins":
+		return runRecipeBuiltins(subargs)
 	case "help", "-h", "--help":
 		printRecipeUsage()
 		return nil
@@ -916,15 +922,22 @@ such as adding load() statements for native rules or updating MODULE.bazel.
   bazelbump recipe <subcommand> [flags]
 
 %s
-  list    List available recipes (built-in and discovered)
-  show    Show recipe details including steps
-  run     Run a recipe against your project
+  list      List available recipes (built-in and discovered)
+  show      Show recipe details including steps
+  run       Run a recipe against your project
+  init      Create a new recipe from a template
+  validate  Validate a recipe file without running it
+  builtins  List available Starlark builtins
 
 %s
   bazelbump recipe list
   bazelbump recipe show autoload-migration
   bazelbump recipe run autoload-migration --dry-run
   bazelbump recipe run ./custom-recipe.star --dry-run
+  bazelbump recipe init my-recipe --template flag-cleanup
+  bazelbump recipe validate ./my-recipe.star
+  bazelbump recipe builtins
+  bazelbump recipe builtins ensure_load
 
 %s
   .bazelbump/recipes/*.star    Project recipes (highest priority)
@@ -1426,7 +1439,8 @@ recipe's steps. Always run with --dry-run first to preview changes.
   --path       Path to project directory (default: current directory)
   --step       Run only a specific step (by ID)
   --verbose    Show verbose output
-  --json       Output results as JSON
+  --json       Output results as JSON (machine-readable)
+  --no-color   Disable colored output
   --help       Show this help
 
 %s
@@ -1445,6 +1459,9 @@ recipe's steps. Always run with --dry-run first to preview changes.
   # Run only the detection step
   bazelbump recipe run --step detect-native-rules autoload-migration
 
+  # Get machine-readable output
+  bazelbump recipe run --dry-run --json autoload-migration
+
 %s
   If a step fails, the recipe's on_failure mode determines behavior:
   - rollback: Revert all changes and stop (default)
@@ -1461,6 +1478,7 @@ recipe's steps. Always run with --dry-run first to preview changes.
 	stepID := fs.String("step", "", "Run only a specific step")
 	verbose := fs.Bool("verbose", false, "Show verbose output")
 	jsonOutput := fs.Bool("json", false, "Output results as JSON")
+	noColor := fs.Bool("no-color", false, "Disable colored output")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1477,7 +1495,7 @@ recipe's steps. Always run with --dry-run first to preview changes.
 	discovered, resolveErr := recipestar.ResolveRecipe(name, *projectPath)
 	if resolveErr == nil {
 		// Found a Starlark recipe - run it
-		return runStarlarkRecipe(discovered.Path, *projectPath, *dryRun, *stepID, *verbose, *jsonOutput)
+		return runStarlarkRecipe(discovered.Path, *projectPath, *dryRun, *stepID, *verbose, *jsonOutput, *noColor)
 	}
 
 	// Fall back to built-in Go recipes
@@ -1514,6 +1532,439 @@ recipe's steps. Always run with --dry-run first to preview changes.
 	return nil
 }
 
+func runRecipeValidate(args []string) error {
+	fs := flag.NewFlagSet("recipe validate", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Validate a recipe file without running it.
+
+Checks the recipe for syntax errors, structural issues, and potential problems
+without making any changes to your project.
+
+%s
+  bazelbump recipe validate [flags] <recipe-file>
+  bazelbump recipe validate [flags] <recipe-name>
+
+%s
+  --json   Output results as JSON
+  --path   Path to project directory (default: current directory)
+  --help   Show this help
+
+%s
+  bazelbump recipe validate ./my-recipe.star
+  bazelbump recipe validate ./recipes/autoload.star --json
+  bazelbump recipe validate autoload-migration
+
+%s
+  - Syntax is valid Starlark
+  - Recipe metadata is complete (name, version)
+  - All steps have unique IDs
+  - Step dependencies form a valid DAG (no cycles)
+  - All operations reference valid builtins
+  - File patterns and regex patterns are valid
+`, color(colorBold, "Usage:"),
+			color(colorBold, "Flags:"),
+			color(colorBold, "Examples:"),
+			color(colorBold, "Validation Checks:"))
+	}
+
+	jsonOutput := fs.Bool("json", false, "Output results as JSON")
+	projectPath := fs.String("path", ".", "Path to project directory")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if fs.NArg() < 1 {
+		fs.Usage()
+		return fmt.Errorf("recipe file required")
+	}
+
+	recipeArg := fs.Arg(0)
+
+	// Resolve the recipe path
+	var absPath string
+	var err error
+
+	// Check if it's an explicit path or a recipe name
+	if strings.HasSuffix(recipeArg, ".star") || strings.Contains(recipeArg, "/") || strings.Contains(recipeArg, string(os.PathSeparator)) {
+		// Explicit path
+		absPath, err = filepath.Abs(recipeArg)
+		if err != nil {
+			return fmt.Errorf("invalid path: %w", err)
+		}
+	} else {
+		// Recipe name - try to resolve it
+		discovered, resolveErr := recipestar.ResolveRecipe(recipeArg, *projectPath)
+		if resolveErr != nil {
+			return fmt.Errorf("unknown recipe: %s\n\nUse 'bazelbump recipe list' to see available recipes", recipeArg)
+		}
+		absPath = discovered.Path
+	}
+
+	// Check file exists
+	if _, err := os.Stat(absPath); err != nil {
+		return fmt.Errorf("recipe file not found: %s", recipeArg)
+	}
+
+	// Perform validation
+	validationResult := validateRecipeFile(absPath, *projectPath)
+
+	if *jsonOutput {
+		return outputValidationJSON(validationResult)
+	}
+
+	outputValidationText(validationResult)
+
+	if !validationResult.Valid {
+		os.Exit(1)
+	}
+	return nil
+}
+
+// validationResult holds the results of recipe validation.
+type validationResult struct {
+	File        string             `json:"file"`
+	Valid       bool               `json:"valid"`
+	RecipeName  string             `json:"recipe_name,omitempty"`
+	Version     string             `json:"version,omitempty"`
+	Checks      []validationCheck  `json:"checks"`
+	Errors      []validationIssue  `json:"errors,omitempty"`
+	Warnings    []validationIssue  `json:"warnings,omitempty"`
+}
+
+// validationCheck represents a single validation check.
+type validationCheck struct {
+	Name    string `json:"name"`
+	Passed  bool   `json:"passed"`
+	Message string `json:"message,omitempty"`
+}
+
+// validationIssue represents an error or warning during validation.
+type validationIssue struct {
+	Message string `json:"message"`
+	Hint    string `json:"hint,omitempty"`
+}
+
+// validateRecipeFile performs comprehensive validation of a recipe file.
+func validateRecipeFile(path, projectPath string) *validationResult {
+	result := &validationResult{
+		File:   path,
+		Valid:  true,
+		Checks: make([]validationCheck, 0),
+	}
+
+	// Create interpreter for parsing
+	interp := recipestar.NewInterpreter(recipestar.WithProjectPath(projectPath))
+
+	// Phase 1: Syntax validation
+	recipe, parseErr := interp.LoadFile(path)
+	if parseErr != nil {
+		result.Valid = false
+		result.Checks = append(result.Checks, validationCheck{
+			Name:    "Syntax valid",
+			Passed:  false,
+			Message: parseErr.Error(),
+		})
+		result.Errors = append(result.Errors, validationIssue{
+			Message: parseErr.Error(),
+			Hint:    "Check the Starlark syntax and ensure all required arguments are provided",
+		})
+		return result
+	}
+
+	result.Checks = append(result.Checks, validationCheck{
+		Name:   "Syntax valid",
+		Passed: true,
+	})
+
+	// Store recipe metadata
+	result.RecipeName = recipe.Name
+	result.Version = recipe.Version
+
+	// Phase 2: Recipe metadata validation
+	metadataValid := true
+	var metadataMsg string
+	if recipe.Name == "" {
+		metadataValid = false
+		metadataMsg = "recipe name is missing"
+	} else if recipe.Version == "" {
+		metadataValid = false
+		metadataMsg = "recipe version is missing"
+	}
+
+	if metadataValid {
+		result.Checks = append(result.Checks, validationCheck{
+			Name:   "Recipe metadata complete (name, version)",
+			Passed: true,
+		})
+	} else {
+		result.Valid = false
+		result.Checks = append(result.Checks, validationCheck{
+			Name:    "Recipe metadata complete (name, version)",
+			Passed:  false,
+			Message: metadataMsg,
+		})
+		result.Errors = append(result.Errors, validationIssue{
+			Message: metadataMsg,
+			Hint:    "Add missing 'name' and 'version' arguments to the recipe() call",
+		})
+	}
+
+	// Phase 3: Step ID uniqueness
+	stepIDs := make(map[string]bool)
+	duplicateIDs := make([]string, 0)
+	for _, step := range recipe.Steps {
+		id := step.GetID()
+		if stepIDs[id] {
+			duplicateIDs = append(duplicateIDs, id)
+		}
+		stepIDs[id] = true
+	}
+
+	if len(duplicateIDs) == 0 {
+		result.Checks = append(result.Checks, validationCheck{
+			Name:   "All steps have unique IDs",
+			Passed: true,
+		})
+	} else {
+		result.Valid = false
+		result.Checks = append(result.Checks, validationCheck{
+			Name:    "All steps have unique IDs",
+			Passed:  false,
+			Message: fmt.Sprintf("duplicate IDs: %s", strings.Join(duplicateIDs, ", ")),
+		})
+		result.Errors = append(result.Errors, validationIssue{
+			Message: fmt.Sprintf("Duplicate step IDs found: %s", strings.Join(duplicateIDs, ", ")),
+			Hint:    "Each step must have a unique 'id' parameter",
+		})
+	}
+
+	// Phase 4: Dependency validation (DAG check)
+	depErrors := validateDependencies(recipe.Steps, stepIDs)
+	if len(depErrors) == 0 {
+		result.Checks = append(result.Checks, validationCheck{
+			Name:   "Step dependencies form valid DAG",
+			Passed: true,
+		})
+	} else {
+		result.Valid = false
+		result.Checks = append(result.Checks, validationCheck{
+			Name:    "Step dependencies form valid DAG",
+			Passed:  false,
+			Message: depErrors[0].Message,
+		})
+		result.Errors = append(result.Errors, depErrors...)
+	}
+
+	// Phase 5: Operation validation using the executor's validate method
+	executor := recipestar.NewExecutor(projectPath, recipestar.Options{})
+	validationErrors := executor.ValidateRecipe(recipe)
+
+	// Filter out errors we've already reported
+	var opErrors []string
+	for _, e := range validationErrors {
+		// Skip metadata errors (already reported)
+		if strings.Contains(e, "recipe name") || strings.Contains(e, "recipe version") {
+			continue
+		}
+		// Skip duplicate ID errors (already reported)
+		if strings.Contains(e, "duplicate step ID") {
+			continue
+		}
+		// Skip dependency errors (already reported)
+		if strings.Contains(e, "depends on unknown") || strings.Contains(e, "circular") {
+			continue
+		}
+		opErrors = append(opErrors, e)
+	}
+
+	if len(opErrors) == 0 {
+		result.Checks = append(result.Checks, validationCheck{
+			Name:   "All operations reference valid builtins",
+			Passed: true,
+		})
+	} else {
+		result.Valid = false
+		result.Checks = append(result.Checks, validationCheck{
+			Name:    "All operations reference valid builtins",
+			Passed:  false,
+			Message: fmt.Sprintf("%d operation error(s)", len(opErrors)),
+		})
+		for _, e := range opErrors {
+			result.Errors = append(result.Errors, validationIssue{
+				Message: e,
+			})
+		}
+	}
+
+	// Add warnings for potential issues
+	warnings := checkForWarnings(recipe)
+	result.Warnings = warnings
+
+	return result
+}
+
+// validateDependencies checks for missing dependencies and cycles.
+func validateDependencies(steps []recipestar.Step, stepIDs map[string]bool) []validationIssue {
+	var issues []validationIssue
+
+	// Build dependency graph
+	graph := make(map[string][]string)
+	for _, step := range steps {
+		id := step.GetID()
+		deps := step.GetDependsOn()
+		graph[id] = deps
+
+		// Check for unknown dependencies
+		for _, dep := range deps {
+			if !stepIDs[dep] {
+				availableSteps := make([]string, 0, len(stepIDs))
+				for s := range stepIDs {
+					availableSteps = append(availableSteps, s)
+				}
+				slices.Sort(availableSteps)
+				issues = append(issues, validationIssue{
+					Message: fmt.Sprintf("Step %q depends on unknown step %q", id, dep),
+					Hint:    fmt.Sprintf("Available steps: %s", strings.Join(availableSteps, ", ")),
+				})
+			}
+		}
+	}
+
+	// Check for cycles using DFS
+	visited := make(map[string]bool)
+	recStack := make(map[string]bool)
+	var cyclePath []string
+
+	var hasCycle func(id string) bool
+	hasCycle = func(id string) bool {
+		visited[id] = true
+		recStack[id] = true
+		cyclePath = append(cyclePath, id)
+
+		for _, dep := range graph[id] {
+			if !visited[dep] {
+				if hasCycle(dep) {
+					return true
+				}
+			} else if recStack[dep] {
+				cyclePath = append(cyclePath, dep)
+				return true
+			}
+		}
+
+		recStack[id] = false
+		cyclePath = cyclePath[:len(cyclePath)-1]
+		return false
+	}
+
+	for _, step := range steps {
+		id := step.GetID()
+		if !visited[id] {
+			cyclePath = nil
+			if hasCycle(id) {
+				issues = append(issues, validationIssue{
+					Message: fmt.Sprintf("Circular dependency detected: %s", strings.Join(cyclePath, " -> ")),
+					Hint:    "Remove the circular dependency by restructuring step dependencies",
+				})
+				break
+			}
+		}
+	}
+
+	return issues
+}
+
+// checkForWarnings identifies potential issues that don't prevent execution.
+func checkForWarnings(recipe *recipestar.Recipe) []validationIssue {
+	var warnings []validationIssue
+
+	// Warning: No description
+	if recipe.Description == "" {
+		warnings = append(warnings, validationIssue{
+			Message: "Recipe has no description",
+			Hint:    "Add a 'description' parameter to help users understand what this recipe does",
+		})
+	}
+
+	// Warning: Steps without names
+	for _, step := range recipe.Steps {
+		if step.GetName() == "" {
+			warnings = append(warnings, validationIssue{
+				Message: fmt.Sprintf("Step %q has no display name", step.GetID()),
+				Hint:    "Add a 'name' parameter for better output readability",
+			})
+		}
+	}
+
+	return warnings
+}
+
+// outputValidationJSON outputs validation results as JSON.
+func outputValidationJSON(result *validationResult) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(result)
+}
+
+// outputValidationText outputs validation results as human-readable text.
+func outputValidationText(result *validationResult) {
+	fmt.Printf("Validating %s...\n\n", filepath.Base(result.File))
+
+	// Print each check
+	for _, check := range result.Checks {
+		if check.Passed {
+			fmt.Printf("%s %s\n", color(colorGreen, "OK"), check.Name)
+		} else {
+			fmt.Printf("%s %s\n", color(colorRed, "X"), check.Name)
+			if check.Message != "" {
+				fmt.Printf("   %s\n", check.Message)
+			}
+		}
+	}
+
+	// Print detailed errors
+	if len(result.Errors) > 0 {
+		fmt.Println()
+		for _, err := range result.Errors {
+			fmt.Printf("%s %s\n", color(colorRed, "X"), err.Message)
+			if err.Hint != "" {
+				fmt.Printf("\n  %s %s\n", color(colorBlue, "hint:"), err.Hint)
+			}
+		}
+	}
+
+	// Print warnings
+	if len(result.Warnings) > 0 {
+		fmt.Println()
+		fmt.Printf("%s\n", color(colorBold, "Warnings:"))
+		for _, warn := range result.Warnings {
+			fmt.Printf("  %s %s\n", color(colorYellow, "!"), warn.Message)
+			if warn.Hint != "" {
+				fmt.Printf("    %s %s\n", color(colorBlue, "hint:"), warn.Hint)
+			}
+		}
+	}
+
+	// Print summary
+	fmt.Println()
+	if result.Valid {
+		if result.RecipeName != "" {
+			fmt.Printf("Recipe %q v%s is valid!\n",
+				color(colorGreen, result.RecipeName),
+				result.Version)
+		} else {
+			fmt.Printf("%s Recipe is valid!\n", color(colorGreen, "[OK]"))
+		}
+	} else {
+		errorCount := len(result.Errors)
+		if errorCount == 0 {
+			errorCount = 1 // At least one check failed
+		}
+		fmt.Printf("Found %d error(s). Recipe is invalid.\n", errorCount)
+	}
+}
+
 // formatSearchPaths formats the recipe search paths for error messages.
 func formatSearchPaths(projectPath string) string {
 	paths := recipestar.GetDiscoveryPaths(projectPath)
@@ -1527,7 +1978,7 @@ func formatSearchPaths(projectPath string) string {
 }
 
 // runStarlarkRecipe runs a Starlark .star recipe file.
-func runStarlarkRecipe(path, projectPath string, dryRun bool, stepID string, verbose, jsonOutput bool) error {
+func runStarlarkRecipe(path, projectPath string, dryRun bool, stepID string, verbose, jsonOutput, noColor bool) error {
 	// Resolve path
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -1556,14 +2007,11 @@ func runStarlarkRecipe(path, projectPath string, dryRun bool, stepID string, ver
 		return fmt.Errorf("recipe execution failed: %w", err)
 	}
 
-	// Convert to recipe.Result for output compatibility
-	recipeResult := convertStarlarkResult(result)
-
 	if jsonOutput {
-		return outputRecipeRunJSON(recipeResult)
+		return outputRecipeRunDiffJSON(result, dryRun)
 	}
 
-	outputRecipeRunText(recipeResult, dryRun)
+	outputRecipeRunDiffText(result, dryRun, noColor)
 
 	if !result.Success {
 		os.Exit(1)
@@ -1721,5 +2169,174 @@ func outputRecipeRunText(result *recipe.Result, dryRun bool) {
 		if result.Error != nil {
 			fmt.Printf("    %s %s\n", color(colorRed, "error:"), result.Error)
 		}
+	}
+}
+
+// --- Diff-style output for Starlark recipe run ---
+
+// diffJSONOutput is the JSON structure for recipe run with diff information.
+type diffJSONOutput struct {
+	Recipe  string           `json:"recipe"`
+	DryRun  bool             `json:"dry_run"`
+	Success bool             `json:"success"`
+	Changes []diffJSONChange `json:"changes"`
+	Summary diffJSONSummary  `json:"summary"`
+	Error   string           `json:"error,omitempty"`
+}
+
+// diffJSONChange represents a single file change in JSON format.
+type diffJSONChange struct {
+	File  string         `json:"file"`
+	Hunks []diffJSONHunk `json:"hunks"`
+}
+
+// diffJSONHunk represents a single hunk (diff region) in JSON format.
+type diffJSONHunk struct {
+	Line    int    `json:"line"`
+	Type    string `json:"type"`
+	Content string `json:"content"`
+}
+
+// diffJSONSummary provides summary statistics.
+type diffJSONSummary struct {
+	Files   int `json:"files"`
+	Removed int `json:"removed"`
+	Added   int `json:"added"`
+}
+
+// outputRecipeRunDiffJSON outputs the recipe result as JSON with diff information.
+func outputRecipeRunDiffJSON(result *recipestar.Result, dryRun bool) error {
+	out := diffJSONOutput{
+		Recipe:  result.Recipe,
+		DryRun:  dryRun,
+		Success: result.Success,
+		Changes: make([]diffJSONChange, 0),
+	}
+
+	if result.Error != nil {
+		out.Error = result.Error.Error()
+	}
+
+	filesSet := make(map[string]bool)
+	totalAdded := 0
+	totalRemoved := 0
+
+	for _, change := range result.Changes {
+		if change == nil {
+			continue
+		}
+		filesSet[change.Path] = true
+
+		jsonChange := diffJSONChange{
+			File:  change.Path,
+			Hunks: make([]diffJSONHunk, 0),
+		}
+
+		for _, hunk := range change.Hunks {
+			for _, line := range hunk.Lines {
+				jsonChange.Hunks = append(jsonChange.Hunks, diffJSONHunk{
+					Line:    line.LineNo,
+					Type:    line.Type,
+					Content: line.Content,
+				})
+				if line.Type == "add" {
+					totalAdded++
+				} else if line.Type == "remove" {
+					totalRemoved++
+				}
+			}
+		}
+
+		out.Changes = append(out.Changes, jsonChange)
+	}
+
+	out.Summary = diffJSONSummary{
+		Files:   len(filesSet),
+		Removed: totalRemoved,
+		Added:   totalAdded,
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+// outputRecipeRunDiffText outputs the recipe result with diff-style formatting.
+func outputRecipeRunDiffText(result *recipestar.Result, dryRun, noColor bool) {
+	colorFn := func(c, s string) string {
+		if noColor || !useColor() {
+			return s
+		}
+		return c + s + colorReset
+	}
+
+	modeStr := ""
+	if dryRun {
+		modeStr = " " + colorFn(colorYellow, "(dry-run)")
+	}
+	fmt.Printf("%s Running recipe: %s%s\n", colorFn(colorBlue, "==>"), colorFn(colorBold, result.Recipe), modeStr)
+
+	if !result.Success {
+		fmt.Printf("\n%s Recipe failed at step %d.\n", colorFn(colorRed, "[FAIL]"), result.StepsRun)
+		if result.Error != nil {
+			fmt.Printf("    %s %s\n", colorFn(colorRed, "error:"), result.Error)
+		}
+		return
+	}
+
+	if len(result.Changes) == 0 {
+		fmt.Printf("\n%s No changes needed.\n", colorFn(colorGreen, "[OK]"))
+		return
+	}
+
+	fmt.Println()
+	totalAdded := 0
+	totalRemoved := 0
+	filesSet := make(map[string]bool)
+
+	for _, change := range result.Changes {
+		if change == nil {
+			continue
+		}
+		filesSet[change.Path] = true
+
+		fmt.Printf("%s\n", colorFn(colorBold, change.Path))
+		lineLen := len(change.Path)
+		if lineLen > 60 {
+			lineLen = 60
+		}
+		fmt.Printf("%s\n", strings.Repeat("\u2500", lineLen))
+
+		for _, hunk := range change.Hunks {
+			fmt.Printf("%s\n", colorFn(colorCyan, fmt.Sprintf("@@ -%d,%d +%d,%d @@",
+				hunk.OldStart, hunk.OldCount, hunk.NewStart, hunk.NewCount)))
+
+			for _, line := range hunk.Lines {
+				switch line.Type {
+				case "add":
+					fmt.Printf("%s %s\n", colorFn(colorGreen, "+"), colorFn(colorGreen, line.Content))
+					totalAdded++
+				case "remove":
+					fmt.Printf("%s %s\n", colorFn(colorRed, "-"), colorFn(colorRed, line.Content))
+					totalRemoved++
+				case "context":
+					fmt.Printf("  %s\n", line.Content)
+				}
+			}
+		}
+		fmt.Println()
+	}
+
+	fmt.Printf("%s\n", colorFn(colorBold, "Summary"))
+	fmt.Printf("%s\n", strings.Repeat("\u2500", 7))
+	fmt.Printf("  Files modified: %d\n", len(filesSet))
+	fmt.Printf("  Lines removed:  %s\n", colorFn(colorRed, fmt.Sprintf("%d", totalRemoved)))
+	fmt.Printf("  Lines added:    %s\n", colorFn(colorGreen, fmt.Sprintf("%d", totalAdded)))
+
+	fmt.Println()
+	if dryRun {
+		fmt.Printf("Run without --dry-run to apply changes.\n")
+	} else {
+		fmt.Printf("%s Changes applied successfully.\n", colorFn(colorGreen, "[OK]"))
 	}
 }

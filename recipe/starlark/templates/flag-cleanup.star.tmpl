@@ -1,0 +1,28 @@
+# {{.Name}} - {{.Description}}
+#
+# This recipe removes deprecated/removed flags from .bazelrc files.
+# These flags were used to opt into behavior changes that are now the default
+# in newer Bazel versions.
+#
+# Usage:
+#   bazelbump recipe run {{.FileName}} --dry-run
+#   bazelbump recipe run {{.FileName}}
+
+recipe(
+    name = "{{.Name}}",
+    version = "1.0.0",
+    description = "{{.Description}}",
+    steps = [
+        edit(
+            id = "remove-flags",
+            name = "Remove deprecated flags",
+            description = "Remove deprecated/removed flags from .bazelrc",
+            operations = [
+                # Add flags to remove below:
+                # remove_flag("experimental_enable_bzlmod"),
+                # remove_flag("incompatible_enable_cc_toolchain_resolution"),
+                # remove_flag("incompatible_autoload_externally"),
+            ],
+        ),
+    ],
+)

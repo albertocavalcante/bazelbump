@@ -139,6 +139,13 @@ func (e *Executor) Interpret(path string) (*Recipe, error) {
 	return e.interpreter.LoadFile(path)
 }
 
+// ValidateRecipe validates a recipe without executing it.
+// This is the public interface for validation (Phase 2).
+// Returns all validation errors found.
+func (e *Executor) ValidateRecipe(recipe *Recipe) []string {
+	return e.validate(recipe)
+}
+
 // validate checks a recipe for errors before execution (Phase 2).
 // Returns ALL validation errors, not just the first one.
 func (e *Executor) validate(recipe *Recipe) []string {
@@ -999,6 +1006,7 @@ func (e *Executor) removeLoadFromFile(ctx *Context, file, rule string) (*FileCha
 		NewContent:  newContent,
 		Description: fmt.Sprintf("Remove load statement for %s", rule),
 	}
+	change.PopulateHunks()
 
 	if !ctx.DryRun {
 		if err := os.WriteFile(file, newContent, 0644); err != nil {
@@ -1051,6 +1059,7 @@ func (e *Executor) ensureLoadInFile(ctx *Context, file, rule, loadFrom string) (
 		NewContent:  newContent,
 		Description: fmt.Sprintf("Add load statement for %s", rule),
 	}
+	change.PopulateHunks()
 
 	if !ctx.DryRun {
 		if err := os.WriteFile(file, newContent, 0644); err != nil {
@@ -1140,6 +1149,7 @@ func (e *Executor) ensureLoadsForMatches(ctx *Context, file string, matches []Ma
 		NewContent:  newContent,
 		Description: fmt.Sprintf("Add load statements for %d rules", len(matches)),
 	}
+	change.PopulateHunks()
 
 	if !ctx.DryRun {
 		if err := os.WriteFile(file, newContent, 0644); err != nil {
@@ -1240,6 +1250,7 @@ func (e *Executor) opEnsureBazelDep(ctx *Context, op *EnsureBazelDepOp) ([]*File
 		NewContent:  newContent,
 		Description: fmt.Sprintf("Add bazel_dep for %s", op.Name),
 	}
+	change.PopulateHunks()
 
 	if !ctx.DryRun {
 		if err := os.WriteFile(modulePath, newContent, 0644); err != nil {
@@ -1277,6 +1288,7 @@ func (e *Executor) opUpdateBazelDep(ctx *Context, op *UpdateBazelDepOp) ([]*File
 		NewContent:  []byte(newContentStr),
 		Description: fmt.Sprintf("Update bazel_dep %s to version %s", op.Name, op.Version),
 	}
+	change.PopulateHunks()
 
 	if !ctx.DryRun {
 		if err := os.WriteFile(modulePath, []byte(newContentStr), 0644); err != nil {
@@ -1323,6 +1335,7 @@ func (e *Executor) opRemoveBazelDep(ctx *Context, op *RemoveBazelDepOp) ([]*File
 		NewContent:  newContent,
 		Description: fmt.Sprintf("Remove bazel_dep %s", op.Name),
 	}
+	change.PopulateHunks()
 
 	if !ctx.DryRun {
 		if err := os.WriteFile(modulePath, newContent, 0644); err != nil {
@@ -1379,6 +1392,7 @@ func (e *Executor) opRemoveFlag(ctx *Context, op *RemoveFlagOp) ([]*FileChange, 
 		NewContent:  newContent,
 		Description: fmt.Sprintf("Remove flag %s", op.Flag),
 	}
+	change.PopulateHunks()
 
 	if !ctx.DryRun {
 		if err := os.WriteFile(filePath, newContent, 0644); err != nil {
@@ -1416,6 +1430,7 @@ func (e *Executor) opReplaceFlag(ctx *Context, op *ReplaceFlagOp) ([]*FileChange
 		NewContent:  []byte(newContent),
 		Description: fmt.Sprintf("Replace flag %s with %s", op.Old, op.New),
 	}
+	change.PopulateHunks()
 
 	if !ctx.DryRun {
 		if err := os.WriteFile(filePath, []byte(newContent), 0644); err != nil {
@@ -1474,6 +1489,7 @@ func (e *Executor) opEnsureFlag(ctx *Context, op *EnsureFlagOp) ([]*FileChange, 
 		NewContent:  []byte(newContent),
 		Description: fmt.Sprintf("Add flag %s to %s config", op.Flag, config),
 	}
+	change.PopulateHunks()
 
 	if !ctx.DryRun {
 		if err := os.WriteFile(filePath, []byte(newContent), 0644); err != nil {
@@ -1547,6 +1563,7 @@ func (e *Executor) replaceTextInFile(ctx *Context, file string, op *ReplaceTextO
 		NewContent:  []byte(newContent),
 		Description: fmt.Sprintf("Replace text in %s", filepath.Base(file)),
 	}
+	change.PopulateHunks()
 
 	if !ctx.DryRun {
 		if err := os.WriteFile(file, []byte(newContent), 0644); err != nil {
@@ -1573,6 +1590,7 @@ func (e *Executor) opCopyFile(ctx *Context, op *CopyFileOp) ([]*FileChange, erro
 		NewContent:  content,
 		Description: fmt.Sprintf("Copy %s to %s", op.Src, op.Dst),
 	}
+	change.PopulateHunks()
 
 	if !ctx.DryRun {
 		if err := os.WriteFile(dst, content, 0644); err != nil {
@@ -1611,6 +1629,7 @@ func (e *Executor) opDeleteFile(ctx *Context, op *DeleteFileOp) ([]*FileChange, 
 			NewContent:  nil,
 			Description: fmt.Sprintf("Delete %s", filepath.Base(file)),
 		}
+		change.PopulateHunks()
 
 		if !ctx.DryRun {
 			if err := os.Remove(file); err != nil {
