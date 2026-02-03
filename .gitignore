@@ -1,0 +1,32 @@
+# Build artifacts
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+coverage.out
+coverage.html
+*.test
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Synced data (regenerate with: just sync-flags)
+data/flags/
+
+# Tool dependencies (regenerate with: go mod tidy)
+tools/*/go.sum
+
+# Local config
+.bazelbump/
