@@ -15,6 +15,7 @@
 | `transform/` | ✅ Complete | Generate and apply patches for flag issues |
 | `recipe/` | ✅ Complete | Multi-step, multi-file migration framework |
 | `recipe/starlark/` | ✅ Complete | Starlark recipe DSL with three-phase execution |
+| `pkg/track/` | ✅ Complete | Git-aware file tracking for undo/rollback |
 | `internal/version/` | ✅ Complete | Bazel version parsing and comparison |
 
 ### CLI (`cmd/bazelbump/`)
@@ -28,6 +29,10 @@
 | `recipe list` | ✅ Working | List available recipes |
 | `recipe show` | ✅ Working | Show recipe details |
 | `recipe run` | ✅ Working | Run a recipe (supports .star files) |
+| `status` | ✅ Working | Show pending/tracked changes |
+| `undo` | ✅ Working | Revert last recipe changes |
+| `snapshot list` | ✅ Working | List available snapshots |
+| `snapshot delete` | ✅ Working | Delete a snapshot |
 | `version` | ✅ Working | Show version info |
 
 ### Starlark Recipe System
@@ -81,9 +86,9 @@ Users can now write fully custom recipes:
 ### Phase 2: Production Readiness (Current Focus)
 
 - Real-world testing on OSS projects
-- Built-in recipes (autoload, bzlmod migration)
+- ✅ **Git-aware undo system** - `pkg/track/` with `bazelbump undo`, `bazelbump status`, `bazelbump snapshot list/delete`
+- ✅ **Autoload migration recipe** - `examples/recipes/autoload-migration.star` for Bazel 9 native rule load statements
 - **Formatter recipes added**: `format-buildifier.star`, `format-skyfmt.star`, `format-compare.star`
-- Snapshot & rollback
 
 ### Phase 3: Ecosystem Integration
 
