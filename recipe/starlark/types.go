@@ -153,6 +153,11 @@ type ScanStep struct {
 
 	// Patterns are regex patterns to detect within files.
 	Patterns []string
+
+	// CustomImpl holds a custom Starlark function for scanning.
+	// When set, this function is called instead of the default pattern-based scanner.
+	// The function receives (ctx) and returns a list of match dicts.
+	CustomImpl any
 }
 
 // EditStep modifies files using a list of operations.
@@ -161,6 +166,10 @@ type EditStep struct {
 
 	// Operations is the list of file modification operations to perform.
 	Operations []Operation
+
+	// CustomOperations holds a custom Starlark function for generating operations.
+	// When set, this function is called with (ctx) and returns a list of operations.
+	CustomOperations any
 }
 
 // VerifyStep runs a command to verify correctness after changes.

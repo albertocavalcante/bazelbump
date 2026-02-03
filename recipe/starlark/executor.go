@@ -33,6 +33,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"go.starlark.net/starlark"
+	"go.starlark.net/starlarkstruct"
 )
 
 // Executor runs Starlark recipes through the three-phase execution model.
@@ -212,6 +215,11 @@ func (e *Executor) validateStep(step Step, stepIndex map[string]Step) []string {
 func (e *Executor) validateScanStep(stepPrefix string, scan *ScanStep) []string {
 	var errors []string
 
+	// If custom impl is provided, skip pattern validation
+	if scan.CustomImpl != nil {
+		return errors
+	}
+
 	// Check file patterns
 	if len(scan.FilePatterns) == 0 {
 		errors = append(errors, fmt.Sprintf("%s: scan step requires at least one file pattern", stepPrefix))
@@ -238,6 +246,11 @@ func (e *Executor) validateScanStep(stepPrefix string, scan *ScanStep) []string 
 // validateEditStep validates an edit step.
 func (e *Executor) validateEditStep(stepPrefix string, edit *EditStep) []string {
 	var errors []string
+
+	// If custom operations function is provided, skip static operations check
+	if edit.CustomOperations != nil {
+		return errors
+	}
 
 	if len(edit.Operations) == 0 {
 		errors = append(errors, fmt.Sprintf("%s: edit step has no operations", stepPrefix))
@@ -590,6 +603,11 @@ func (e *Executor) executeStep(ctx *Context, step Step) *StepResult {
 
 // executeScan runs a scan step and returns the results.
 func (e *Executor) executeScan(ctx *Context, scan *ScanStep) (*ScanResult, error) {
+	// Check for custom implementation
+	if scan.CustomImpl != nil {
+		return e.executeCustomScan(ctx, scan)
+	}
+
 	result := &ScanResult{
 		Matches: make([]Match, 0),
 		Files:   make([]string, 0),
@@ -770,6 +788,11 @@ func (e *Executor) getRuleFamily(rule string) string {
 
 // executeEdit runs an edit step and returns the file changes.
 func (e *Executor) executeEdit(ctx *Context, edit *EditStep) ([]*FileChange, error) {
+	// Check for custom operations function
+	if edit.CustomOperations != nil {
+		return e.executeCustomEdit(ctx, edit)
+	}
+
 	var changes []*FileChange
 
 	for _, op := range edit.Operations {
@@ -1664,4 +1687,199 @@ func (e *ValidationError) Error() string {
 // NewValidationError creates a validation error from a list of error messages.
 func NewValidationError(errors ...string) *ValidationError {
 	return &ValidationError{Errors: errors}
+}
+
+// executeCustomScan runs a custom scan function and returns the results.
+func (e *Executor) executeCustomScan(ctx *Context, scan *ScanStep) (*ScanResult, error) {
+	callable, ok := scan.CustomImpl.(starlark.Callable)
+	if !ok {
+		return nil, fmt.Errorf("custom scan impl is not callable")
+	}
+
+	// Create the ctx object for Starlark
+	starlarkCtx := makeStarlarkContext(ctx)
+
+	// Call the custom function
+	thread := &starlark.Thread{Name: "custom_scan"}
+	result, err := starlark.Call(thread, callable, starlark.Tuple{starlarkCtx}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("custom scan function failed: %w", err)
+	}
+
+	// Convert result to ScanResult
+	return convertScanResult(result, scan.ID)
+}
+
+// executeCustomEdit runs a custom edit operations function and returns the file changes.
+func (e *Executor) executeCustomEdit(ctx *Context, edit *EditStep) ([]*FileChange, error) {
+	callable, ok := edit.CustomOperations.(starlark.Callable)
+	if !ok {
+		return nil, fmt.Errorf("custom operations is not callable")
+	}
+
+	// Create the ctx object for Starlark
+	starlarkCtx := makeStarlarkContext(ctx)
+
+	// Call the custom function
+	thread := &starlark.Thread{Name: "custom_edit"}
+	result, err := starlark.Call(thread, callable, starlark.Tuple{starlarkCtx}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("custom operations function failed: %w", err)
+	}
+
+	// Convert result to operations and execute them
+	ops, err := e.convertStarlarkOperations(result)
+	if err != nil {
+		return nil, err
+	}
+
+	var changes []*FileChange
+	for _, op := range ops {
+		opChanges, err := e.executeOperation(ctx, op)
+		if err != nil {
+			return changes, err
+		}
+		changes = append(changes, opChanges...)
+	}
+
+	return changes, nil
+}
+
+// makeStarlarkContext creates a Starlark struct representing the execution context.
+func makeStarlarkContext(ctx *Context) starlark.Value {
+	// Convert outputs to Starlark dict
+	outputsDict := starlark.NewDict(len(ctx.Outputs))
+	for k, v := range ctx.Outputs {
+		// Convert ScanResult to Starlark list of dicts
+		if sr, ok := v.(*ScanResult); ok {
+			matches := make([]starlark.Value, len(sr.Matches))
+			for i, m := range sr.Matches {
+				matchDict := starlark.NewDict(5)
+				matchDict.SetKey(starlark.String("file"), starlark.String(m.File))
+				matchDict.SetKey(starlark.String("line"), starlark.MakeInt(m.Line))
+				matchDict.SetKey(starlark.String("text"), starlark.String(m.Text))
+				matchDict.SetKey(starlark.String("rule"), starlark.String(m.Rule))
+				matchDict.SetKey(starlark.String("family"), starlark.String(m.Family))
+				matches[i] = matchDict
+			}
+			outputsDict.SetKey(starlark.String(k), starlark.NewList(matches))
+		}
+	}
+
+	return starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
+		"project_path": starlark.String(ctx.ProjectPath),
+		"dry_run":      starlark.Bool(ctx.DryRun),
+		"outputs":      outputsDict,
+	})
+}
+
+// convertScanResult converts a Starlark list of match dicts to a ScanResult.
+func convertScanResult(val starlark.Value, stepID string) (*ScanResult, error) {
+	list, ok := val.(*starlark.List)
+	if !ok {
+		return nil, fmt.Errorf("custom scan must return a list, got %s", val.Type())
+	}
+
+	result := &ScanResult{
+		StepID:   stepID,
+		Resolved: true,
+		Matches:  make([]Match, 0, list.Len()),
+	}
+
+	rulesFound := make(map[string]bool)
+	filesFound := make(map[string]bool)
+	familiesFound := make(map[string]bool)
+
+	iter := list.Iterate()
+	defer iter.Done()
+	var item starlark.Value
+	for iter.Next(&item) {
+		dict, ok := item.(*starlark.Dict)
+		if !ok {
+			return nil, fmt.Errorf("scan result items must be dicts, got %s", item.Type())
+		}
+
+		match := Match{}
+
+		if v, found, _ := dict.Get(starlark.String("file")); found {
+			if s, ok := v.(starlark.String); ok {
+				match.File = string(s)
+				filesFound[match.File] = true
+			}
+		}
+		if v, found, _ := dict.Get(starlark.String("line")); found {
+			if n, ok := v.(starlark.Int); ok {
+				line, _ := n.Int64()
+				match.Line = int(line)
+			}
+		}
+		if v, found, _ := dict.Get(starlark.String("text")); found {
+			if s, ok := v.(starlark.String); ok {
+				match.Text = string(s)
+			}
+		}
+		if v, found, _ := dict.Get(starlark.String("rule")); found {
+			if s, ok := v.(starlark.String); ok {
+				match.Rule = string(s)
+				rulesFound[match.Rule] = true
+			}
+		}
+		if v, found, _ := dict.Get(starlark.String("family")); found {
+			if s, ok := v.(starlark.String); ok {
+				match.Family = string(s)
+				familiesFound[match.Family] = true
+			}
+		}
+
+		result.Matches = append(result.Matches, match)
+	}
+
+	// Build aggregated fields
+	for f := range filesFound {
+		result.Files = append(result.Files, f)
+	}
+	sort.Strings(result.Files)
+
+	for r := range rulesFound {
+		result.Rules = append(result.Rules, r)
+	}
+	sort.Strings(result.Rules)
+
+	for f := range familiesFound {
+		result.Families = append(result.Families, f)
+	}
+	sort.Strings(result.Families)
+
+	result.Count = len(result.Matches)
+
+	return result, nil
+}
+
+// convertStarlarkOperations converts a Starlark list of operations to Go Operation slice.
+func (e *Executor) convertStarlarkOperations(val starlark.Value) ([]Operation, error) {
+	list, ok := val.(*starlark.List)
+	if !ok {
+		return nil, fmt.Errorf("operations function must return a list, got %s", val.Type())
+	}
+
+	var ops []Operation
+	iter := list.Iterate()
+	defer iter.Done()
+	var item starlark.Value
+	for iter.Next(&item) {
+		// Skip None values
+		if item == starlark.None {
+			continue
+		}
+
+		// Check if it's an operationValue wrapper
+		if opVal, ok := item.(operationValue); ok {
+			ops = append(ops, opVal.op)
+			continue
+		}
+
+		return nil, fmt.Errorf("operations must be created with ensure_load(), ensure_bazel_dep(), etc., got %s", item.Type())
+	}
+
+	return ops, nil
 }

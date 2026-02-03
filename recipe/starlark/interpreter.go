@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/qri-io/starlib/re"
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 )
@@ -44,6 +45,10 @@ type Interpreter struct {
 
 	// recipe is the recipe being built during interpretation.
 	recipe *Recipe
+
+	// projectPath is the root directory of the project being analyzed.
+	// Used for resolving relative paths in file operations.
+	projectPath string
 }
 
 // loadCacheEntry holds a cached loaded module.
@@ -59,6 +64,14 @@ type InterpreterOption func(*Interpreter)
 func WithSearchPaths(paths ...string) InterpreterOption {
 	return func(i *Interpreter) {
 		i.recipeSearchPaths = paths
+	}
+}
+
+// WithProjectPath sets the project path for resolving relative file paths.
+// This is used by file I/O builtins like parse_build_file.
+func WithProjectPath(path string) InterpreterOption {
+	return func(i *Interpreter) {
+		i.projectPath = path
 	}
 }
 
@@ -94,7 +107,7 @@ func NewInterpreter(opts ...InterpreterOption) *Interpreter {
 
 // makeBuiltins creates the predeclared functions for the recipe DSL.
 func (i *Interpreter) makeBuiltins() starlark.StringDict {
-	return starlark.StringDict{
+	builtins := starlark.StringDict{
 		// Core recipe function
 		"recipe": starlark.NewBuiltin("recipe", i.builtinRecipe),
 
@@ -130,7 +143,27 @@ func (i *Interpreter) makeBuiltins() starlark.StringDict {
 
 		// Struct constructor for custom types
 		"struct": starlark.NewBuiltin("struct", starlarkstruct.Make),
+
+		// BUILD file parsing builtins
+		"parse_build_file": starlark.NewBuiltin("parse_build_file", builtinParseBuildFile(i.projectPath)),
+
+		// File I/O builtins (sandboxed to project directory)
+		"read_file":   starlark.NewBuiltin("read_file", i.builtinReadFile),
+		"file_exists": starlark.NewBuiltin("file_exists", i.builtinFileExists),
+		"list_dir":    starlark.NewBuiltin("list_dir", i.builtinListDir),
+		"glob":        starlark.NewBuiltin("glob", i.builtinGlob),
 	}
+
+	// Add the starlib regex module as a predeclared global.
+	// This provides re.match(), re.findall(), re.sub(), re.split(), etc.
+	reModule, err := re.LoadModule()
+	if err == nil {
+		for name, value := range reModule {
+			builtins[name] = value
+		}
+	}
+
+	return builtins
 }
 
 // LoadFile parses a .star file and returns the defined recipe.
@@ -411,26 +444,42 @@ func (i *Interpreter) builtinScan(thread *starlark.Thread, fn *starlark.Builtin,
 		description string
 		files       *starlark.List
 		patterns    *starlark.List
+		impl        starlark.Value
 	)
 
 	if err := starlark.UnpackArgs("scan", args, kwargs,
 		"id", &id,
 		"name?", &name,
 		"description?", &description,
-		"files", &files,
-		"patterns", &patterns,
+		"files?", &files,
+		"patterns?", &patterns,
+		"impl?", &impl,
 	); err != nil {
 		return nil, err
 	}
 
-	filePatterns, err := stringListFromStarlark(files, "files")
-	if err != nil {
-		return nil, err
+	// Check that either impl or (files + patterns) is provided
+	hasImpl := impl != nil && impl != starlark.None
+	hasPatterns := files != nil && patterns != nil
+
+	if !hasImpl && !hasPatterns {
+		return nil, fmt.Errorf("scan() requires either 'impl' or both 'files' and 'patterns'")
 	}
 
-	patternStrs, err := stringListFromStarlark(patterns, "patterns")
-	if err != nil {
-		return nil, err
+	var filePatterns []string
+	var patternStrs []string
+
+	if hasPatterns {
+		var err error
+		filePatterns, err = stringListFromStarlark(files, "files")
+		if err != nil {
+			return nil, err
+		}
+
+		patternStrs, err = stringListFromStarlark(patterns, "patterns")
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	step := &ScanStep{
@@ -441,6 +490,15 @@ func (i *Interpreter) builtinScan(thread *starlark.Thread, fn *starlark.Builtin,
 		},
 		FilePatterns: filePatterns,
 		Patterns:     patternStrs,
+	}
+
+	// Store custom impl if provided
+	if hasImpl {
+		callable, ok := impl.(starlark.Callable)
+		if !ok {
+			return nil, fmt.Errorf("impl must be a callable function, got %s", impl.Type())
+		}
+		step.CustomImpl = callable
 	}
 
 	// Return a future reference that can be used in later steps
@@ -502,7 +560,7 @@ func (i *Interpreter) builtinEdit(thread *starlark.Thread, fn *starlark.Builtin,
 		name        string
 		description string
 		dependsOn   *starlark.List
-		operations  *starlark.List
+		operations  starlark.Value
 	)
 
 	if err := starlark.UnpackArgs("edit", args, kwargs,
@@ -524,23 +582,6 @@ func (i *Interpreter) builtinEdit(thread *starlark.Thread, fn *starlark.Builtin,
 		}
 	}
 
-	// Convert operations
-	var ops []Operation
-	iter := operations.Iterate()
-	defer iter.Done()
-	var opVal starlark.Value
-	for iter.Next(&opVal) {
-		// Skip None values (for conditional operations)
-		if opVal == starlark.None {
-			continue
-		}
-		op, ok := opVal.(operationValue)
-		if !ok {
-			return nil, fmt.Errorf("operations must be created with ensure_load(), ensure_bazel_dep(), etc., got %s", opVal.Type())
-		}
-		ops = append(ops, op.op)
-	}
-
 	step := &EditStep{
 		baseStep: baseStep{
 			ID:          id,
@@ -548,7 +589,31 @@ func (i *Interpreter) builtinEdit(thread *starlark.Thread, fn *starlark.Builtin,
 			Description: description,
 			DependsOn:   deps,
 		},
-		Operations: ops,
+	}
+
+	// Check if operations is a callable (custom transform function)
+	if callable, ok := operations.(starlark.Callable); ok {
+		step.CustomOperations = callable
+	} else if opList, ok := operations.(*starlark.List); ok {
+		// Convert static operations list
+		var ops []Operation
+		iter := opList.Iterate()
+		defer iter.Done()
+		var opVal starlark.Value
+		for iter.Next(&opVal) {
+			// Skip None values (for conditional operations)
+			if opVal == starlark.None {
+				continue
+			}
+			op, ok := opVal.(operationValue)
+			if !ok {
+				return nil, fmt.Errorf("operations must be created with ensure_load(), ensure_bazel_dep(), etc., got %s", opVal.Type())
+			}
+			ops = append(ops, op.op)
+		}
+		step.Operations = ops
+	} else {
+		return nil, fmt.Errorf("operations must be a list or a callable function, got %s", operations.Type())
 	}
 
 	return stepValue{step: step}, nil
