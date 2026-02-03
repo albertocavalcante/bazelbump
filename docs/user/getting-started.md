@@ -22,27 +22,24 @@ just setup  # Downloads flag data and installs bazelbump
 
 This:
 1. Downloads the flag database from registry.build
-2. Installs `bazelbump` to `$GOPATH/bin`
+2. Installs `bazelbump` to `~/.local/bin`
+
+If `~/.local/bin` is not in your PATH, the installer will show you how to add it.
 
 ### Alternative Installation Methods
 
-#### Install to ~/.local/bin
+#### Install to $GOPATH/bin
 
-If you don't use `$GOPATH`:
+If you prefer using Go's standard install location:
 
 ```bash
 git clone https://github.com/albertocavalcante/bazelbump.git
 cd bazelbump
 just sync-flags
-just install-local
+just install-gopath
 ```
 
-Add `~/.local/bin` to your PATH if needed:
-
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
+Make sure `$GOPATH/bin` is in your PATH.
 
 #### System-wide Install
 

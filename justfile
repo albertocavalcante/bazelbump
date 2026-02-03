@@ -20,15 +20,8 @@ build-cli:
 
 # === INSTALL ===
 
-# Install CLI to $GOPATH/bin (recommended)
+# Install CLI to ~/.local/bin (recommended)
 install:
-    @echo "Installing bazelbump to \$GOPATH/bin..."
-    go install ./cmd/bazelbump
-    @echo "✓ Installed! Make sure \$GOPATH/bin is in your PATH"
-    @echo "  Run: bazelbump --help"
-
-# Install CLI to ~/.local/bin (no GOPATH needed)
-install-local:
     #!/usr/bin/env bash
     mkdir -p ~/.local/bin
     echo "Building bazelbump..."
@@ -37,11 +30,23 @@ install-local:
     if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
         echo ""
         echo "⚠ Add ~/.local/bin to your PATH:"
-        echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
-        echo "  source ~/.bashrc"
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc"
+            echo "  source ~/.zshrc"
+        else
+            echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
+            echo "  source ~/.bashrc"
+        fi
     fi
     echo ""
     echo "Run: bazelbump --help"
+
+# Install CLI to $GOPATH/bin
+install-gopath:
+    @echo "Installing bazelbump to \$GOPATH/bin..."
+    go install ./cmd/bazelbump
+    @echo "✓ Installed! Make sure \$GOPATH/bin is in your PATH"
+    @echo "  Run: bazelbump --help"
 
 # Install to /usr/local/bin (requires sudo)
 install-system:

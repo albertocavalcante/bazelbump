@@ -21,14 +21,14 @@ Upgrading Bazel is tedious. Breaking changes are scattered across release notes,
 ```bash
 git clone https://github.com/albertocavalcante/bazelbump.git
 cd bazelbump
-just setup  # Syncs flag data and installs to $GOPATH/bin
+just setup  # Syncs flag data and installs to ~/.local/bin
 ```
 
 ### Alternative Install Methods
 
 ```bash
-# Install to ~/.local/bin (no GOPATH needed)
-just install-local
+# Install to $GOPATH/bin
+just install-gopath
 
 # Install to /usr/local/bin (system-wide)
 just install-system
