@@ -18,6 +18,196 @@ bazelbump consolidates this into a single, automated workflow.
 
 ---
 
+## Architecture Principles
+
+bazelbump follows three core architectural principles:
+
+### 1. Proto-First
+
+All data types are defined as Protocol Buffers first, providing:
+
+- **Language-agnostic contracts** — Types can be used across Go, Python, Rust, etc.
+- **Serialization for free** — Binary, JSON, and text formats
+- **Schema evolution** — Backward-compatible changes via proto3 semantics
+- **API contracts** — Clear interface definitions for library consumers
+
+**Vendor canonical protos when available:**
+
+```
+proto/
+├── vendor/                          # Vendored from upstream (automated sync)
+│   └── bazel/                       # From bazelbuild/bazel
+│       ├── src/main/protobuf/
+│       │   ├── build.proto          # BUILD file representation
+│       │   ├── analysis.proto       # Analysis results
+│       │   └── command_line.proto   # Command line structure
+│       └── MODULE.bazel.lock.proto  # Lockfile schema (if exists)
+└── bazelbump/                       # Our custom protos
+    └── v1/
+        ├── flag.proto               # Flag deprecation/migration
+        ├── version.proto            # Version info and constraints
+        ├── analysis.proto           # Upgrade analysis results
+        ├── bazelrc.proto            # Parsed .bazelrc representation
+        └── migration.proto          # Migration rules and hints
+```
+
+**Vendor automation** (similar to go-bzlmod's buildtools approach):
+
+```bash
+# tools/sync-protos.sh
+# Fetches canonical protos from Bazel repo at pinned commit
+BAZEL_COMMIT="abc123"
+curl -L "https://github.com/bazelbuild/bazel/archive/${BAZEL_COMMIT}.tar.gz" | \
+  tar -xz --strip-components=1 -C proto/vendor/bazel \
+  "bazel-${BAZEL_COMMIT}/src/main/protobuf/"
+```
+
+**Custom proto example:**
+
+```protobuf
+// proto/bazelbump/v1/flag.proto
+syntax = "proto3";
+package bazelbump.v1;
+
+option go_package = "github.com/albertocavalcante/bazelbump/proto/bazelbump/v1;bazelbumpv1";
+
+// FlagChange represents a flag deprecation or removal between Bazel versions.
+message FlagChange {
+  string name = 1;                    // Flag name (e.g., "--incompatible_foo")
+  string deprecated_in = 2;           // Version where deprecated
+  string removed_in = 3;              // Version where removed (empty if still present)
+  string replacement = 4;             // Replacement flag or empty
+  MigrationAction action = 5;
+  string message = 6;                 // Human-readable deprecation message
+  string github_issue = 7;            // Associated issue URL
+}
+
+enum MigrationAction {
+  MIGRATION_ACTION_UNSPECIFIED = 0;
+  MIGRATION_ACTION_REMOVE = 1;        // Just remove the flag
+  MIGRATION_ACTION_RENAME = 2;        // Rename to replacement
+  MIGRATION_ACTION_REPLACE = 3;       // Replace with different flag
+  MIGRATION_ACTION_UPDATE_VALUE = 4;  // Update the value
+  MIGRATION_ACTION_MANUAL = 5;        // Requires manual intervention
+}
+
+// FlagDatabase contains all known flag changes across Bazel versions.
+message FlagDatabase {
+  repeated FlagChange changes = 1;
+  string last_updated = 2;            // ISO 8601 timestamp
+  string bazel_commit = 3;            // Bazel commit this was generated from
+}
+```
+
+### 2. Lib-First
+
+The library (`libbazelbump`) provides all functionality. The CLI is a thin wrapper.
+
+**Benefits:**
+
+- **Embeddable** — Use in CI systems, IDEs, other tools
+- **Testable** — Unit test the library directly
+- **Composable** — Mix and match functionality
+- **Multiple frontends** — CLI, TUI, web UI, language bindings
+
+**Library API design:**
+
+```go
+// pkg/libbazelbump/libbazelbump.go
+package libbazelbump
+
+import (
+    pb "github.com/albertocavalcante/bazelbump/proto/bazelbump/v1"
+)
+
+// Client is the main entry point for bazelbump functionality.
+type Client struct {
+    config *Config
+    cache  Cache
+}
+
+// NewClient creates a new bazelbump client.
+func NewClient(opts ...Option) (*Client, error)
+
+// Analyze performs upgrade analysis between two Bazel versions.
+func (c *Client) Analyze(ctx context.Context, req *pb.AnalyzeRequest) (*pb.AnalyzeResponse, error)
+
+// Check validates current project compatibility.
+func (c *Client) Check(ctx context.Context, req *pb.CheckRequest) (*pb.CheckResponse, error)
+
+// Apply executes migrations (with dry-run support).
+func (c *Client) Apply(ctx context.Context, req *pb.ApplyRequest) (*pb.ApplyResponse, error)
+
+// GetFlagChanges returns flag changes between versions.
+func (c *Client) GetFlagChanges(ctx context.Context, from, to string) ([]*pb.FlagChange, error)
+```
+
+**CLI as thin wrapper:**
+
+```go
+// cmd/bazelbump/main.go
+func main() {
+    client, _ := libbazelbump.NewClient()
+
+    // CLI just parses args and calls library
+    resp, err := client.Analyze(ctx, &pb.AnalyzeRequest{
+        FromVersion: fromFlag,
+        ToVersion:   toFlag,
+        ProjectPath: pathFlag,
+    })
+
+    // Format and print response
+    formatter.Print(resp, outputFormat)
+}
+```
+
+### 3. Vendor-First
+
+External dependencies are vendored with automation for reproducibility.
+
+**What to vendor:**
+
+| Dependency | Source | Automation |
+|------------|--------|------------|
+| buildtools | `bazelbuild/buildtools` | `tools/sync-buildtools.sh` |
+| Bazel protos | `bazelbuild/bazel/src/main/protobuf` | `tools/sync-protos.sh` |
+| Flag database | Generated from Bazel releases | `tools/generate-flags.sh` |
+
+**Vendor structure:**
+
+```
+third_party/
+├── buildtools/              # Starlark parser (from go-bzlmod pattern)
+│   ├── build/
+│   ├── tables/
+│   └── README.md            # Version info, sync instructions
+└── sync.sh                  # Master sync script
+
+proto/vendor/
+├── bazel/                   # Canonical Bazel protos
+│   └── src/main/protobuf/
+└── README.md                # Commit hash, sync date
+```
+
+**Sync automation:**
+
+```makefile
+# Makefile
+.PHONY: sync-deps
+sync-deps: sync-buildtools sync-protos
+
+sync-buildtools:
+    ./tools/sync-buildtools.sh $(BUILDTOOLS_VERSION)
+
+sync-protos:
+    ./tools/sync-protos.sh $(BAZEL_VERSION)
+
+generate: sync-deps
+    buf generate proto/
+```
+
+---
+
 ## CLI Interface
 
 ### Commands
@@ -607,48 +797,125 @@ bazelbump analyze --to 9.0.0 --offline
 
 ### Package Structure
 
+Following the proto-first, lib-first, vendor-first architecture:
+
 ```
 bazelbump/
-├── cmd/
+├── proto/                           # PROTO-FIRST: All types defined here
+│   ├── bazelbump/v1/                # Our custom protos
+│   │   ├── flag.proto               # Flag deprecation/migration types
+│   │   ├── version.proto            # Version info, constraints
+│   │   ├── analysis.proto           # Upgrade analysis request/response
+│   │   ├── bazelrc.proto            # Parsed .bazelrc representation
+│   │   ├── module.proto             # MODULE.bazel types
+│   │   └── migration.proto          # Migration rules and hints
+│   ├── vendor/                      # Vendored canonical protos
+│   │   └── bazel/
+│   │       └── src/main/protobuf/
+│   └── buf.yaml                     # Buf configuration
+│
+├── pkg/                             # LIB-FIRST: Public library API
+│   └── libbazelbump/
+│       ├── client.go                # Main Client type
+│       ├── analyze.go               # Analyze() implementation
+│       ├── check.go                 # Check() implementation
+│       ├── apply.go                 # Apply() implementation
+│       ├── flags.go                 # Flag operations
+│       ├── options.go               # Functional options
+│       └── libbazelbump_test.go
+│
+├── cmd/                             # CLI: Thin wrapper over library
 │   └── bazelbump/
-│       └── main.go           # CLI entry point
-├── internal/
+│       ├── main.go                  # Entry point
+│       ├── analyze.go               # analyze command
+│       ├── check.go                 # check command
+│       ├── apply.go                 # apply command
+│       ├── flags.go                 # flags command
+│       └── format.go                # Output formatting
+│
+├── internal/                        # Private implementation details
 │   ├── bazelrc/
-│   │   ├── parser.go         # .bazelrc parser
-│   │   ├── parser_test.go
-│   │   └── types.go
-│   ├── module/
-│   │   ├── parser.go         # MODULE.bazel parser (uses buildtools)
-│   │   ├── compatibility.go  # bazel_compatibility handling
-│   │   └── update.go         # MODULE.bazel modifications
+│   │   ├── parser.go                # .bazelrc parser
+│   │   └── parser_test.go
+│   ├── starlark/
+│   │   ├── module.go                # MODULE.bazel parsing (uses buildtools)
+│   │   └── workspace.go             # WORKSPACE parsing
 │   ├── version/
-│   │   ├── detect.go         # Version detection
-│   │   ├── compare.go        # Version comparison
-│   │   └── lts.go            # LTS version tracking
-│   ├── flags/
-│   │   ├── database.go       # Flag deprecation database
-│   │   ├── migration.go      # Flag migration logic
-│   │   └── incompatible.go   # Incompatible flag tracking
-│   ├── analysis/
-│   │   ├── analyzer.go       # Main analysis orchestrator
-│   │   ├── report.go         # Report generation
-│   │   └── diff.go           # Version diff computation
+│   │   ├── detect.go                # Version detection
+│   │   ├── compare.go               # Version comparison
+│   │   └── lts.go                   # LTS version tracking
+│   ├── flagdb/
+│   │   ├── database.go              # Flag database operations
+│   │   ├── generate.go              # Database generation from Bazel
+│   │   └── embed.go                 # Embedded database
 │   ├── registry/
-│   │   ├── bcr.go            # BCR client
-│   │   └── cache.go          # Registry caching
-│   └── migration/
-│       ├── workspace.go      # WORKSPACE migration hints
-│       └── rules.go          # Deprecated rules detection
-├── third_party/
-│   └── buildtools/           # Vendored Starlark parser
-│       ├── build/
-│       └── tables/
-├── data/
-│   ├── flags.json            # Embedded flag database
-│   └── rules.json            # Embedded deprecated rules
+│   │   ├── bcr.go                   # BCR client
+│   │   └── github.go                # GitHub API client
+│   └── cache/
+│       └── cache.go                 # Caching layer
+│
+├── third_party/                     # VENDOR-FIRST: Vendored dependencies
+│   ├── buildtools/                  # Starlark parser
+│   │   ├── build/
+│   │   ├── tables/
+│   │   └── README.md                # Version, sync info
+│   └── sync.sh                      # Vendor sync script
+│
+├── tools/                           # Development/sync tooling
+│   ├── sync-buildtools.sh           # Sync buildtools from upstream
+│   ├── sync-protos.sh               # Sync Bazel protos
+│   └── generate-flags.sh            # Generate flag database
+│
+├── gen/                             # Generated code (from protos)
+│   └── go/
+│       └── bazelbump/v1/
+│           ├── flag.pb.go
+│           ├── version.pb.go
+│           └── ...
+│
+├── data/                            # Embedded data files
+│   └── flags.pb                     # Flag database (protobuf binary)
+│
+├── buf.gen.yaml                     # Buf code generation config
+├── buf.work.yaml                    # Buf workspace config
+├── Makefile                         # Build, generate, sync targets
 ├── go.mod
 ├── go.sum
 └── SPEC.md
+```
+
+### Build Targets
+
+```makefile
+# Makefile
+.PHONY: all generate build test sync
+
+all: generate build
+
+# Generate Go code from protos
+generate:
+	buf generate
+
+# Build CLI
+build: generate
+	go build -o bin/bazelbump ./cmd/bazelbump
+
+# Run tests
+test: generate
+	go test ./...
+
+# Sync all vendored dependencies
+sync: sync-buildtools sync-protos
+
+sync-buildtools:
+	./tools/sync-buildtools.sh v0.1.0
+
+sync-protos:
+	./tools/sync-protos.sh 7.4.0
+
+# Generate flag database from Bazel releases
+generate-flagdb:
+	./tools/generate-flags.sh > data/flags.pb
 ```
 
 ### Dependencies
@@ -660,6 +927,10 @@ module github.com/albertocavalcante/bazelbump
 go 1.22
 
 require (
+    // Proto runtime
+    google.golang.org/protobuf v1.32.0      // Proto runtime (required for generated code)
+
+    // CLI layer only
     github.com/spf13/cobra v1.8.0           // CLI framework
     github.com/fatih/color v1.16.0          // Colored output
     github.com/olekukonko/tablewriter v0.0.5 // Table formatting
@@ -667,6 +938,16 @@ require (
 
 // Vendored (no external dependency):
 // - buildtools/build (Starlark parser)
+// - bazel protos (canonical types)
+```
+
+```yaml
+# buf.gen.yaml
+version: v1
+plugins:
+  - plugin: buf.build/protocolbuffers/go
+    out: gen/go
+    opt: paths=source_relative
 ```
 
 ### Development Phases
