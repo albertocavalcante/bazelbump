@@ -20,33 +20,37 @@ build-cli:
 
 # === INSTALL ===
 
-# Install CLI to user bin directory (cross-platform)
-install:
+# Default install directories per platform
+default_install_dir := if os() == "windows" { env("LOCALAPPDATA") / "Programs" / "bazelbump" } else { env("HOME") / ".local" / "bin" }
+
+# Install CLI to user bin directory (cross-platform, customizable)
+install dir=default_install_dir:
     #!/usr/bin/env bash
     set -e
-    mkdir -p ~/.local/bin
+    dir="{{dir}}"
+    mkdir -p "$dir"
     echo "Building bazelbump..."
-    go build -o ~/.local/bin/bazelbump ./cmd/bazelbump
-    echo "✓ Installed to ~/.local/bin/bazelbump"
-    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    go build -o "$dir/bazelbump" ./cmd/bazelbump
+    echo "✓ Installed to $dir/bazelbump"
+    if [[ ":$PATH:" != *":$dir:"* ]]; then
         echo ""
-        echo "⚠ Add ~/.local/bin to your PATH:"
+        echo "⚠ Add $dir to your PATH:"
         if [[ "$OSTYPE" == "darwin"* ]]; then
-            echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc"
+            echo "  echo 'export PATH=\"$dir:\$PATH\"' >> ~/.zshrc"
             echo "  source ~/.zshrc"
         else
-            echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
+            echo "  echo 'export PATH=\"$dir:\$PATH\"' >> ~/.bashrc"
             echo "  source ~/.bashrc"
         fi
     fi
     echo ""
     echo "Run: bazelbump --help"
 
-# Install CLI on Windows
+# Install CLI on Windows (customizable)
 [windows]
-install:
+install dir=default_install_dir:
     #!powershell
-    $installDir = "$env:LOCALAPPDATA\Programs\bazelbump"
+    $installDir = "{{dir}}"
     Write-Host "Building bazelbump..."
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
     go build -o "$installDir\bazelbump.exe" ./cmd/bazelbump
