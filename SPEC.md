@@ -397,6 +397,406 @@ CHANGE: Add load statement to //src/lib:BUILD
 
 ---
 
+## Rules Ecosystem & Agentic Architecture
+
+### The Rules Problem
+
+Bazel's power comes from its **plugin-first architecture** — rules like `rules_go`, `rules_python`, `rules_java` extend Bazel's capabilities. But this creates upgrade blockers:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  YOU WANT TO UPGRADE: Bazel 8.0 → 9.0                          │
+├─────────────────────────────────────────────────────────────────┤
+│  BLOCKERS:                                                      │
+│  ├── rules_go@0.46.0 — max bazel_compatibility: <=8.x          │
+│  ├── rules_python@0.31.0 — uses deprecated native.py_library   │
+│  └── internal_rules (proprietary) — unknown compatibility       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**This is not solvable by deterministic transforms alone.**
+
+### Expanding Scope: CLI → Agent
+
+bazelbump must evolve from a CLI tool to an **agentic upgrade assistant**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    BAZELBUMP ARCHITECTURE                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │   CLI MODE   │  │  AGENT MODE  │  │ WORKFLOW MODE│          │
+│  │              │  │              │  │              │          │
+│  │ Quick fixes  │  │ Complex ops  │  │ Long-running │          │
+│  │ Local only   │  │ LLM-powered  │  │ Multi-step   │          │
+│  │ Deterministic│  │ Heuristic+AI │  │ Orchestrated │          │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘          │
+│         │                 │                 │                   │
+│         ▼                 ▼                 ▼                   │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │              CORE LIBRARY (libbazelbump)                 │   │
+│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐        │   │
+│  │  │ Parser  │ │Analyzer │ │Transform│ │ Registry│        │   │
+│  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘        │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Agent Capabilities
+
+#### 1. Patch Generation (LLM-Powered)
+
+When a ruleset isn't compatible and no fix exists:
+
+```go
+// agent/patch.go
+
+type PatchRequest struct {
+    Ruleset       string   // e.g., "rules_go"
+    CurrentVersion string
+    TargetBazel   string
+    ErrorLog      string   // Build failure output
+    SourceFiles   []File   // Relevant source from the ruleset
+}
+
+type PatchResponse struct {
+    Patch       string       // Generated diff
+    Confidence  float64      // 0.0-1.0
+    Explanation string       // Why this patch should work
+    TestPlan    string       // How to verify the patch
+    Caveats     []string     // Known limitations
+}
+
+// GeneratePatch uses LLM to create a compatibility patch
+func (a *Agent) GeneratePatch(ctx context.Context, req *PatchRequest) (*PatchResponse, error) {
+    // 1. Gather context: ruleset source, Bazel changes, error logs
+    // 2. Build prompt with relevant code snippets
+    // 3. Request patch from LLM
+    // 4. Validate patch syntax (deterministic check)
+    // 5. Optionally: test patch in sandbox
+    // 6. Return with confidence score
+}
+```
+
+**Key insight:** The agent doesn't replace deterministic transforms — it handles the **long tail** where recipes don't exist.
+
+#### 2. Bug Report Drafting
+
+When upgrade is blocked and no workaround exists:
+
+```go
+// agent/issues.go
+
+type IssueContext struct {
+    Ruleset       string
+    RulesetRepo   string       // e.g., "bazelbuild/rules_go"
+    IsOSS         bool
+    BazelVersion  string
+    ErrorDetails  string
+    SimilarIssues []GitHubIssue  // Found during research
+}
+
+type DraftIssue struct {
+    Title       string
+    Body        string
+    Labels      []string
+    References  []string   // Links to related issues, docs
+    Confidence  float64
+}
+
+// DraftBugReport generates an issue for ruleset maintainers
+func (a *Agent) DraftBugReport(ctx context.Context, c *IssueContext) (*DraftIssue, error) {
+    // 1. Search existing issues (deterministic)
+    // 2. If duplicate found, suggest commenting instead
+    // 3. Analyze error and Bazel changes
+    // 4. Generate structured bug report
+    // 5. Include minimal reproduction steps
+    // 6. Reference relevant Bazel changes
+}
+```
+
+**Output example:**
+
+```markdown
+## Title: [Bazel 9.0] Compatibility issue with native rule autoloading
+
+## Environment
+- rules_go version: 0.46.0
+- Bazel version: 9.0.0 (upgrading from 8.0.0)
+- OS: Linux
+
+## Problem
+After upgrading to Bazel 9.0, builds fail with:
+```
+ERROR: no such target '@rules_go//go:def.bzl': target 'def.bzl' not declared
+```
+
+## Root Cause Analysis
+Bazel 9.0 changed `--incompatible_autoload_externally` default (bazelbuild/bazel#23043).
+rules_go@0.46.0 still relies on native rule autoloading.
+
+## Suggested Fix
+[Agent-generated patch or suggestion]
+
+## Related Issues
+- bazelbuild/bazel#23043 (autoload change)
+- bazelbuild/rules_go#XXXX (similar report)
+```
+
+#### 3. Documentation Mining
+
+**Source code is the best documentation.** When official docs are lacking:
+
+```go
+// agent/docs.go
+
+type DocQuery struct {
+    Topic       string   // e.g., "bazel_compatibility constraint format"
+    Sources     []DocSource
+}
+
+type DocSource int
+const (
+    DocSourceCode      DocSource = iota  // Always check first
+    DocSourceOfficial                     // bazel.build, rules docs
+    DocSourceReleaseNotes                 // GitHub releases
+    DocSourceIssues                       // GitHub issues/discussions
+    DocSourceCommunity                    // Stack Overflow, Slack
+)
+
+// Research finds authoritative information about a topic
+func (a *Agent) Research(ctx context.Context, q *DocQuery) (*DocResult, error) {
+    // Priority order:
+    // 1. Source code (grep for implementations, comments)
+    // 2. Official docs (if exist and current)
+    // 3. Release notes
+    // 4. GitHub issues (often contain explanations)
+    // 5. Community (last resort, verify against source)
+}
+```
+
+**Source code mining example:**
+
+```go
+// Finding bazel_compatibility constraint format
+// Instead of searching docs, search Bazel source:
+
+// BazelModuleResolutionFunction.java:298-333
+// Shows exact parsing logic for constraints
+
+// ModuleFileGlobals.java:65-66
+// Shows constraint syntax: >=, <=, >, <, -
+```
+
+#### 4. Documentation Gap Reporting
+
+When docs are missing or outdated, the agent can draft improvements:
+
+```go
+// agent/docs_improve.go
+
+type DocGap struct {
+    Topic        string
+    CurrentDoc   string   // URL to current doc (if exists)
+    SourceTruth  string   // What source code says
+    Discrepancy  string   // What's missing or wrong
+    SuggestedFix string   // Proposed documentation update
+}
+
+// DetectDocGaps finds documentation issues during research
+func (a *Agent) DetectDocGaps(ctx context.Context) ([]DocGap, error)
+
+// DraftDocPR creates a pull request to improve docs
+func (a *Agent) DraftDocPR(ctx context.Context, gap DocGap) (*DraftPR, error)
+```
+
+### OSS vs Proprietary Handling
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    RULESET TYPE DETECTION                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  OSS Ruleset (e.g., rules_go, rules_python)                     │
+│  ├── Check BCR for latest version                               │
+│  ├── Search GitHub releases for Bazel 9 support                 │
+│  ├── Search issues for known blockers                           │
+│  ├── If fix exists: suggest version upgrade                     │
+│  ├── If PR pending: show status, suggest testing                │
+│  ├── If no fix: attempt patch generation                        │
+│  └── If patch fails: draft issue for maintainers                │
+│                                                                  │
+│  Proprietary Ruleset (internal, vendored)                       │
+│  ├── Cannot search external sources                             │
+│  ├── Analyze source if available locally                        │
+│  ├── Generate compatibility report                              │
+│  ├── Attempt patch generation if source available               │
+│  └── Flag as manual intervention required                       │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Workflow Orchestration with Temporal
+
+Complex upgrades require **durable, resumable workflows**. [Temporal](https://temporal.io) provides:
+
+- **Durability** — Workflows survive process restarts
+- **Visibility** — Track progress of long-running upgrades
+- **Retry logic** — Handle transient failures (API rate limits, etc.)
+- **Human-in-loop** — Pause for approval at critical steps
+
+```go
+// workflows/upgrade.go
+
+// UpgradeWorkflow orchestrates a full Bazel version upgrade
+func UpgradeWorkflow(ctx workflow.Context, req *UpgradeRequest) (*UpgradeResult, error) {
+
+    // Phase 1: Analysis (deterministic)
+    analysis := workflow.ExecuteActivity(ctx, AnalyzeProject, req.ProjectPath)
+
+    // Phase 2: Identify blockers (deterministic)
+    blockers := workflow.ExecuteActivity(ctx, FindBlockers, analysis, req.TargetVersion)
+
+    // Phase 3: Resolve blockers (mixed deterministic + agentic)
+    var resolutions []Resolution
+    for _, blocker := range blockers {
+        switch blocker.Type {
+        case BlockerFlagDeprecated:
+            // Deterministic: apply known transform
+            res := workflow.ExecuteActivity(ctx, ApplyFlagMigration, blocker)
+            resolutions = append(resolutions, res)
+
+        case BlockerRulesetIncompatible:
+            // Agentic: research and suggest fix
+            res := workflow.ExecuteActivity(ctx, ResolveRulesetBlocker, blocker)
+
+            if res.RequiresHumanReview {
+                // Pause workflow, wait for approval
+                workflow.GetSignalChannel(ctx, "approval").Receive(ctx, &approval)
+                if !approval.Approved {
+                    return nil, errors.New("upgrade cancelled by user")
+                }
+            }
+            resolutions = append(resolutions, res)
+
+        case BlockerUnknown:
+            // Agentic: attempt LLM analysis
+            res := workflow.ExecuteActivity(ctx, AgentAnalyzeBlocker, blocker)
+            resolutions = append(resolutions, res)
+        }
+    }
+
+    // Phase 4: Generate upgrade report
+    report := workflow.ExecuteActivity(ctx, GenerateReport, analysis, resolutions)
+
+    // Phase 5: Apply changes (with human approval for agentic changes)
+    if req.AutoApply {
+        for _, res := range resolutions {
+            if res.Confidence >= req.MinConfidence {
+                workflow.ExecuteActivity(ctx, ApplyResolution, res)
+            }
+        }
+    }
+
+    return &UpgradeResult{
+        Report:      report,
+        Resolutions: resolutions,
+        Status:      computeStatus(resolutions),
+    }, nil
+}
+```
+
+**Workflow visualization:**
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  UPGRADE WORKFLOW: my-project (Bazel 8.0 → 9.0)                        │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  [✓] Phase 1: Analysis                                    2 min        │
+│      └── Found 3 blockers                                              │
+│                                                                         │
+│  [✓] Phase 2: Flag migrations                             30 sec       │
+│      └── Applied 5 flag changes to .bazelrc                            │
+│                                                                         │
+│  [●] Phase 3: Ruleset compatibility                       WAITING      │
+│      ├── [✓] rules_go: upgraded to 0.47.0                              │
+│      ├── [✓] rules_python: applied autoload patch                      │
+│      └── [⏸] internal_rules: awaiting human review                     │
+│          │                                                              │
+│          │   Agent generated patch with 0.72 confidence                │
+│          │   [View Patch] [Approve] [Reject] [Request Changes]         │
+│          │                                                              │
+│  [ ] Phase 4: Generate report                                          │
+│  [ ] Phase 5: Apply & verify                                           │
+│                                                                         │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### Recipe vs Agent Decision Tree
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│            WHEN TO USE RECIPE vs AGENT                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Is there a known, deterministic transform?                     │
+│  ├── YES → Use RECIPE (OpenRewrite-style)                       │
+│  │         Examples:                                            │
+│  │         - Flag rename: --foo → --bar                         │
+│  │         - Load addition: known rule → known load             │
+│  │         - Version bump: known safe upgrade                   │
+│  │                                                              │
+│  └── NO → Does it require external research?                    │
+│           ├── NO → Use HEURISTIC (pattern matching)             │
+│           │        Examples:                                    │
+│           │        - Detect native rule usage                   │
+│           │        - Infer module dependencies                  │
+│           │                                                     │
+│           └── YES → Use AGENT (LLM-powered)                     │
+│                     Examples:                                   │
+│                     - Generate compatibility patch              │
+│                     - Draft bug report                          │
+│                     - Mine source for documentation             │
+│                     - Analyze unknown error                     │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Data Sources Priority
+
+```go
+// research/sources.go
+
+// SourcePriority defines the order of trust for information
+var SourcePriority = []Source{
+    // Tier 1: Ground truth
+    {Name: "Bazel Source Code", Trust: 1.0, Type: SourceCode},
+    {Name: "Rules Source Code", Trust: 1.0, Type: SourceCode},
+
+    // Tier 2: Official documentation
+    {Name: "bazel.build docs", Trust: 0.9, Type: OfficialDocs},
+    {Name: "Rules README/docs", Trust: 0.9, Type: OfficialDocs},
+
+    // Tier 3: Release artifacts
+    {Name: "GitHub Releases", Trust: 0.85, Type: ReleaseNotes},
+    {Name: "CHANGELOG files", Trust: 0.85, Type: ReleaseNotes},
+
+    // Tier 4: Community knowledge
+    {Name: "GitHub Issues", Trust: 0.7, Type: Community},
+    {Name: "GitHub Discussions", Trust: 0.7, Type: Community},
+    {Name: "Stack Overflow", Trust: 0.5, Type: Community},
+    {Name: "Bazel Slack", Trust: 0.4, Type: Community},
+}
+
+// Always verify community knowledge against source code
+func (r *Researcher) VerifyAgainstSource(claim Claim) (verified bool, evidence string)
+```
+
+---
+
 ## CLI Interface
 
 ### Commands
