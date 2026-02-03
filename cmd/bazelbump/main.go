@@ -35,6 +35,7 @@ import (
 	"github.com/albertocavalcante/bazelbump/analysis"
 	"github.com/albertocavalcante/bazelbump/flagdb"
 	"github.com/albertocavalcante/bazelbump/recipe"
+	recipestar "github.com/albertocavalcante/bazelbump/recipe/starlark"
 	"github.com/albertocavalcante/bazelbump/transform"
 )
 
@@ -1137,11 +1138,27 @@ func runRecipeRun(args []string) error {
 
 	name := fs.Arg(0)
 
+	// Check if this is a .star file (Starlark recipe)
+	if strings.HasSuffix(name, ".star") || strings.Contains(name, "/") || strings.Contains(name, string(os.PathSeparator)) {
+		return runStarlarkRecipe(name, *projectPath, *dryRun, *stepID, *verbose, *jsonOutput)
+	}
+
+	// Fall back to built-in Go recipes
 	engine := recipe.NewEngine()
 
 	// Verify recipe exists
 	if _, ok := engine.Get(name); !ok {
-		return fmt.Errorf("unknown recipe: %s", name)
+		// Try to find a .star file with this name
+		starPath := name + ".star"
+		if _, err := os.Stat(starPath); err == nil {
+			return runStarlarkRecipe(starPath, *projectPath, *dryRun, *stepID, *verbose, *jsonOutput)
+		}
+		// Check in examples/recipes
+		examplesPath := filepath.Join("examples", "recipes", name+".star")
+		if _, err := os.Stat(examplesPath); err == nil {
+			return runStarlarkRecipe(examplesPath, *projectPath, *dryRun, *stepID, *verbose, *jsonOutput)
+		}
+		return fmt.Errorf("unknown recipe: %s (not a built-in recipe or .star file)", name)
 	}
 
 	opts := recipe.Options{
@@ -1166,6 +1183,80 @@ func runRecipeRun(args []string) error {
 		os.Exit(1)
 	}
 	return nil
+}
+
+// runStarlarkRecipe runs a Starlark .star recipe file.
+func runStarlarkRecipe(path, projectPath string, dryRun bool, stepID string, verbose, jsonOutput bool) error {
+	// Resolve path
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("invalid path: %w", err)
+	}
+
+	// Check file exists
+	if _, err := os.Stat(absPath); err != nil {
+		return fmt.Errorf("recipe file not found: %s", path)
+	}
+
+	// Create executor
+	executor := recipestar.NewExecutor(projectPath, recipestar.Options{
+		DryRun:  dryRun,
+		Verbose: verbose,
+		StepID:  stepID,
+	})
+
+	// Execute the recipe
+	result, err := executor.ExecuteFromFile(absPath, recipestar.Options{
+		DryRun:  dryRun,
+		Verbose: verbose,
+		StepID:  stepID,
+	})
+	if err != nil {
+		return fmt.Errorf("recipe execution failed: %w", err)
+	}
+
+	// Convert to recipe.Result for output compatibility
+	recipeResult := convertStarlarkResult(result)
+
+	if jsonOutput {
+		return outputRecipeRunJSON(recipeResult)
+	}
+
+	outputRecipeRunText(recipeResult, dryRun)
+
+	if !result.Success {
+		os.Exit(1)
+	}
+	return nil
+}
+
+// convertStarlarkResult converts a starlark.Result to a recipe.Result.
+func convertStarlarkResult(sr *recipestar.Result) *recipe.Result {
+	result := &recipe.Result{
+		Recipe:   sr.Recipe,
+		Success:  sr.Success,
+		StepsRun: sr.StepsRun,
+		Error:    sr.Error,
+	}
+
+	for _, stepResult := range sr.StepResults {
+		result.StepResults = append(result.StepResults, &recipe.StepResult{
+			StepID:      stepResult.StepID,
+			StepName:    stepResult.StepName,
+			Success:     stepResult.Success,
+			Description: stepResult.Description,
+			Error:       stepResult.Error,
+		})
+	}
+
+	for _, change := range sr.Changes {
+		result.Changes = append(result.Changes, &recipe.FileChange{
+			Path:        change.Path,
+			Description: change.Description,
+		})
+	}
+
+	return result
 }
 
 // recipeRunOutput is used for JSON serialization of recipe results
