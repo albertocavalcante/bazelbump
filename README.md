@@ -27,15 +27,19 @@ just setup  # Syncs flag data and installs to ~/.local/bin
 ### Alternative Install Methods
 
 ```bash
-# Install to $GOPATH/bin
+# Install to $GOPATH/bin (all platforms)
 just install-gopath
 
-# Install to /usr/local/bin (system-wide)
+# Install to /usr/local/bin (Unix only, system-wide)
 just install-system
 
 # Manual build
 go build -o bazelbump ./cmd/bazelbump
 ```
+
+**Install locations by platform:**
+- **macOS/Linux**: `~/.local/bin/bazelbump`
+- **Windows**: `%LOCALAPPDATA%\Programs\bazelbump\bazelbump.exe`
 
 ### Pre-built Binaries
 

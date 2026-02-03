@@ -20,9 +20,10 @@ build-cli:
 
 # === INSTALL ===
 
-# Install CLI to ~/.local/bin (recommended)
+# Install CLI to user bin directory (cross-platform)
 install:
     #!/usr/bin/env bash
+    set -e
     mkdir -p ~/.local/bin
     echo "Building bazelbump..."
     go build -o ~/.local/bin/bazelbump ./cmd/bazelbump
@@ -41,6 +42,26 @@ install:
     echo ""
     echo "Run: bazelbump --help"
 
+# Install CLI on Windows
+[windows]
+install:
+    #!powershell
+    $installDir = "$env:LOCALAPPDATA\Programs\bazelbump"
+    Write-Host "Building bazelbump..."
+    New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+    go build -o "$installDir\bazelbump.exe" ./cmd/bazelbump
+    Write-Host "✓ Installed to $installDir\bazelbump.exe"
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($userPath -notlike "*$installDir*") {
+        Write-Host ""
+        Write-Host "⚠ Add to your PATH by running:"
+        Write-Host "  [Environment]::SetEnvironmentVariable('Path', `$env:Path + ';$installDir', 'User')"
+        Write-Host ""
+        Write-Host "Then restart your terminal."
+    }
+    Write-Host ""
+    Write-Host "Run: bazelbump --help"
+
 # Install CLI to $GOPATH/bin
 install-gopath:
     @echo "Installing bazelbump to \$GOPATH/bin..."
@@ -48,7 +69,8 @@ install-gopath:
     @echo "✓ Installed! Make sure \$GOPATH/bin is in your PATH"
     @echo "  Run: bazelbump --help"
 
-# Install to /usr/local/bin (requires sudo)
+# Install to /usr/local/bin (requires sudo, Unix only)
+[unix]
 install-system:
     #!/usr/bin/env bash
     echo "Building bazelbump..."
@@ -60,6 +82,7 @@ install-system:
     echo "Run: bazelbump --help"
 
 # Uninstall from common locations
+[unix]
 uninstall:
     #!/usr/bin/env bash
     echo "Removing bazelbump..."
@@ -69,6 +92,23 @@ uninstall:
     echo "✓ Done"
     echo ""
     echo "Note: /usr/local/bin/bazelbump requires: sudo rm /usr/local/bin/bazelbump"
+
+# Uninstall on Windows
+[windows]
+uninstall:
+    #!powershell
+    Write-Host "Removing bazelbump..."
+    $installDir = "$env:LOCALAPPDATA\Programs\bazelbump"
+    if (Test-Path "$installDir\bazelbump.exe") {
+        Remove-Item "$installDir\bazelbump.exe" -Force
+        Write-Host "  Removed from $installDir"
+    }
+    $gopath = if ($env:GOPATH) { $env:GOPATH } else { "$env:USERPROFILE\go" }
+    if (Test-Path "$gopath\bin\bazelbump.exe") {
+        Remove-Item "$gopath\bin\bazelbump.exe" -Force
+        Write-Host "  Removed from $gopath\bin"
+    }
+    Write-Host "✓ Done"
 
 # Quick setup: sync flags and install
 setup: sync-flags install

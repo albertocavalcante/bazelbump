@@ -22,9 +22,13 @@ just setup  # Downloads flag data and installs bazelbump
 
 This:
 1. Downloads the flag database from registry.build
-2. Installs `bazelbump` to `~/.local/bin`
+2. Installs `bazelbump` to a user-local directory
 
-If `~/.local/bin` is not in your PATH, the installer will show you how to add it.
+**Install locations by platform:**
+- **macOS/Linux**: `~/.local/bin/bazelbump`
+- **Windows**: `%LOCALAPPDATA%\Programs\bazelbump\bazelbump.exe`
+
+If the install directory is not in your PATH, the installer will show you how to add it.
 
 ### Alternative Installation Methods
 
@@ -41,7 +45,7 @@ just install-gopath
 
 Make sure `$GOPATH/bin` is in your PATH.
 
-#### System-wide Install
+#### System-wide Install (macOS/Linux only)
 
 ```bash
 git clone https://github.com/albertocavalcante/bazelbump.git
