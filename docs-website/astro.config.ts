@@ -1,6 +1,5 @@
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
-import tailwind from "@astrojs/tailwind";
 
 export default defineConfig({
   site: "https://anthropics.github.io/bazelbump",
@@ -50,8 +49,6 @@ export default defineConfig({
           ],
         },
       ],
-      customCss: ["./src/tailwind.css"],
     }),
-    tailwind({ applyBaseStyles: false }),
   ],
 });
