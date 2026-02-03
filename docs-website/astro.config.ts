@@ -1,19 +1,62 @@
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
+import tailwindcss from "@tailwindcss/vite";
+import fs from "node:fs";
+
+// Load Starlark TextMate grammar for syntax highlighting
+const starlarkGrammar = JSON.parse(
+  fs.readFileSync(
+    new URL("./starlark.tmLanguage.json", import.meta.url),
+    "utf-8"
+  )
+);
 
 export default defineConfig({
-  site: "https://anthropics.github.io/bazelbump",
+  site: "https://albertocavalcante.github.io",
   base: "/bazelbump",
+
+  vite: {
+    plugins: [tailwindcss()],
+  },
+
   integrations: [
     starlight({
       title: "bazelbump",
       description: "Bazel dependency upgrade tool with Starlark recipes",
-      social: {
-        github: "https://github.com/anthropics/bazelbump",
+      favicon: "/favicon.svg",
+      lastUpdated: true,
+      tableOfContents: { minHeadingLevel: 2, maxHeadingLevel: 3 },
+      expressiveCode: {
+        themes: ["github-dark", "github-light"],
+        shiki: {
+          langs: [starlarkGrammar],
+          langAlias: {
+            bzl: "starlark",
+            bazel: "starlark",
+            build: "starlark",
+            star: "starlark",
+          },
+        },
+        styleOverrides: {
+          borderRadius: "0.625rem",
+          codeFontFamily:
+            "'JetBrains Mono', 'SF Mono', 'Fira Code', ui-monospace, monospace",
+          codeFontSize: "0.875rem",
+          codeLineHeight: "1.65",
+        },
       },
+      social: [
+        {
+          icon: "github",
+          label: "GitHub",
+          href: "https://github.com/albertocavalcante/bazelbump",
+        },
+      ],
       editLink: {
-        baseUrl: "https://github.com/anthropics/bazelbump/edit/main/docs-website/",
+        baseUrl:
+          "https://github.com/albertocavalcante/bazelbump/edit/main/docs-website/",
       },
+      customCss: ["./src/styles/global.css"],
       sidebar: [
         {
           label: "Overview",
@@ -27,7 +70,10 @@ export default defineConfig({
           items: [
             { label: "Installation", slug: "getting-started/installation" },
             { label: "Quick Start", slug: "getting-started/quickstart" },
-            { label: "Your First Recipe", slug: "getting-started/first-recipe" },
+            {
+              label: "Your First Recipe",
+              slug: "getting-started/first-recipe",
+            },
           ],
         },
         {

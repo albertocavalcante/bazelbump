@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+/* bazelbump Documentation Styles */
+
+:root {
+  --sl-color-accent-low: #1a365d;
+  --sl-color-accent: #3182ce;
+  --sl-color-accent-high: #90cdf4;
+}
+
+:root[data-theme="dark"] {
+  --sl-color-accent-low: #1a365d;
+  --sl-color-accent: #63b3ed;
+  --sl-color-accent-high: #bee3f8;
+}
+
+/* Code blocks */
+.expressive-code {
+  @apply rounded-xl shadow-lg;
+}
