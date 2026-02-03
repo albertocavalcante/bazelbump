@@ -110,6 +110,102 @@ db, err := sql.Open("sqlite", ".bazelbump/state.db")
 
 This aligns with our **airgap-first** philosophy - single binary, no system dependencies.
 
+### 2.3 Optional Feature (Build Tags)
+
+The checkpointing system is **optional** and can be disabled at compile time using Go build tags (similar to Rust's feature flags):
+
+```bash
+# Full build (default) - includes SQLite checkpointing
+go build ./cmd/bazelbump
+
+# Minimal build - no SQLite, no checkpointing (~5-10MB smaller binary)
+go build -tags nostate ./cmd/bazelbump
+```
+
+**Implementation Pattern:**
+
+```go
+// pkg/state/manager.go - Interface (always included)
+package state
+
+type Manager interface {
+    CreateRun(recipe string, opts RunOptions) (*Run, error)
+    UpdateProgress(runID string, processed, total int) error
+    CreateCheckpoint(opts CheckpointOptions) (*Checkpoint, error)
+    GetLatestCheckpoint(runID string) (*Checkpoint, error)
+    // ... etc
+}
+
+// Feature detection
+func Available() bool  // Returns true if state management is available
+```
+
+```go
+// pkg/state/manager_sqlite.go
+//go:build !nostate
+
+package state
+
+import _ "modernc.org/sqlite"
+
+func New(dbPath string) (Manager, error) {
+    return &sqliteManager{...}, nil
+}
+
+func Available() bool { return true }
+```
+
+```go
+// pkg/state/manager_noop.go
+//go:build nostate
+
+package state
+
+// No-op implementation - all operations succeed silently
+type noopManager struct{}
+
+func New(dbPath string) (Manager, error) {
+    return &noopManager{}, nil
+}
+
+func Available() bool { return false }
+
+func (m *noopManager) CreateCheckpoint(...) (*Checkpoint, error) {
+    return nil, nil // No-op
+}
+```
+
+**CLI Behavior:**
+
+| Build | `--resume` flag | `bazelbump status` |
+|-------|-----------------|-------------------|
+| Default | Works normally | Shows run history |
+| `nostate` | Warns "checkpointing disabled" | Shows "state management not available" |
+
+**Use Cases for Minimal Build:**
+- CI environments where checkpointing isn't needed
+- Embedded/constrained environments
+- Users who prefer smaller binaries
+- Simple one-off migrations
+
+**Justfile Integration:**
+
+```makefile
+# justfile
+build:
+    go build ./cmd/bazelbump
+
+build-minimal:
+    go build -tags nostate ./cmd/bazelbump
+
+# Show binary sizes
+size:
+    @echo "Full build:"
+    @go build -o /tmp/bazelbump-full ./cmd/bazelbump && ls -lh /tmp/bazelbump-full
+    @echo "Minimal build:"
+    @go build -tags nostate -o /tmp/bazelbump-minimal ./cmd/bazelbump && ls -lh /tmp/bazelbump-minimal
+```
+
 ### 2.3 Database Schema
 
 ```sql
