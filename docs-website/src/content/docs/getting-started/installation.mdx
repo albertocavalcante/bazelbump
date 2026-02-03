@@ -1,0 +1,75 @@
+---
+title: Installation
+description: How to install bazelbump
+---
+
+## From Source
+
+bazelbump is written in Go. Build from source:
+
+```bash
+git clone https://github.com/anthropics/bazelbump.git
+cd bazelbump
+go build -o bazelbump ./cmd/bazelbump
+```
+
+Move the binary to your PATH:
+
+```bash
+mv bazelbump /usr/local/bin/
+```
+
+## Verify Installation
+
+```bash
+bazelbump --version
+bazelbump --help
+```
+
+## Shell Completion
+
+Generate shell completions for your shell:
+
+```bash
+# Bash
+bazelbump completion bash > /etc/bash_completion.d/bazelbump
+
+# Zsh
+bazelbump completion zsh > "${fpath[1]}/_bazelbump"
+
+# Fish
+bazelbump completion fish > ~/.config/fish/completions/bazelbump.fish
+```
+
+## Optional: External Tools
+
+bazelbump recipes can invoke external tools. Install these if your recipes use them:
+
+### buildifier
+
+Formats Starlark files:
+
+```bash
+go install github.com/bazelbuild/buildtools/buildifier@latest
+```
+
+### buildozer
+
+Programmatic BUILD file edits:
+
+```bash
+go install github.com/bazelbuild/buildtools/buildozer@latest
+```
+
+### skyfmt
+
+Alternative Starlark formatter from the sky project:
+
+```bash
+# From https://github.com/albertocavalcante/sky
+cd sky && bazel build //cmd/skyfmt
+```
+
+## Next Steps
+
+- [Quick Start](/bazelbump/getting-started/quickstart/) - Run your first recipe

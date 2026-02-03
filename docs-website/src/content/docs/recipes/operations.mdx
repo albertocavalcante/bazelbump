@@ -1,0 +1,229 @@
+---
+title: Operations
+description: Available operations for edit steps
+---
+
+Operations are the building blocks of edit steps. Each operation represents one change to the project.
+
+## File Operations
+
+### write_file
+
+Create or overwrite a file:
+
+```starlark
+write_file(
+    file = "path/to/file.txt",
+    content = "File contents here",
+    description = "Create configuration file",
+)
+```
+
+Parameters:
+- `file` (required): Path to the file
+- `content` (required): Content to write
+- `description` (optional): Human-readable description
+
+### replace_in_file
+
+Replace text within a file:
+
+```starlark
+replace_in_file(
+    file = "MODULE.bazel",
+    old = 'version = "1.0.0"',
+    new = 'version = "2.0.0"',
+    description = "Bump version",
+)
+```
+
+Parameters:
+- `file` (required): Path to the file
+- `old` (required): Text to find
+- `new` (required): Replacement text
+- `description` (optional): Human-readable description
+
+**Note**: Replaces all occurrences of `old` in the file.
+
+### delete_file
+
+Remove a file:
+
+```starlark
+delete_file(
+    file = "path/to/obsolete.txt",
+    description = "Remove deprecated config",
+)
+```
+
+Parameters:
+- `file` (required): Path to the file
+- `description` (optional): Human-readable description
+
+## Command Operations
+
+### run_command
+
+Execute a shell command:
+
+```starlark
+run_command(
+    command = "buildifier -mode=fix .",
+    description = "Format Starlark files",
+    timeout = "5m",
+    allow_failure = False,
+    echo = True,
+    capture = False,
+    env = {"BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN": "1"},
+    working_dir = "subproject/",
+    shell = "bash",
+)
+```
+
+Parameters:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `command` | string | required | Shell command to execute |
+| `description` | string | `""` | Human-readable description |
+| `timeout` | string | `"5m"` | Timeout (e.g., "30s", "5m", "1h") |
+| `allow_failure` | bool | `False` | Continue if command fails |
+| `echo` | bool | `False` | Print command before executing |
+| `capture` | bool | `False` | Store output in ctx.outputs |
+| `env` | dict | `{}` | Environment variables to set |
+| `working_dir` | string | `""` | Working directory (relative to project root) |
+| `shell` | string | `"sh"` | Shell to use ("sh" or "bash") |
+
+## Echo Mode
+
+When `echo = True`, the command is printed before execution:
+
+```starlark
+run_command(
+    command = "bazel build //...",
+    echo = True,
+)
+```
+
+Output:
+```
+$ bazel build //...
+INFO: Analyzed 42 targets...
+```
+
+This is similar to `set -x` in shell scripts.
+
+## Capture Mode
+
+When `capture = True`, command output is stored in `ctx.outputs`:
+
+```starlark
+def query_ops(ctx):
+    return [
+        run_command(
+            command = "bazel query 'deps(//...)'",
+            capture = True,
+        ),
+    ]
+
+def process_query(ctx):
+    # Access captured output from previous step
+    result = ctx.outputs.get("query-step", {})
+
+    stdout = result.get("stdout", "")
+    stderr = result.get("stderr", "")
+    exit_code = result.get("exit_code", 0)
+
+    # Process the output...
+```
+
+Captured output structure:
+```python
+{
+    "stdout": "...",      # Standard output
+    "stderr": "...",      # Standard error
+    "exit_code": 0,       # Exit code
+    "command": "..."      # The executed command
+}
+```
+
+## Environment Variables
+
+Pass environment variables to commands:
+
+```starlark
+run_command(
+    command = "bazel build //...",
+    env = {
+        "CC": "/usr/bin/clang",
+        "BAZEL_CXXOPTS": "-std=c++17",
+    },
+)
+```
+
+## Working Directory
+
+Run commands in a subdirectory:
+
+```starlark
+run_command(
+    command = "npm install",
+    working_dir = "frontend/",
+    description = "Install frontend dependencies",
+)
+```
+
+## Shell Selection
+
+Choose between `sh` and `bash`:
+
+```starlark
+# Use bash for bash-specific features
+run_command(
+    command = "shopt -s globstar && echo **/*.bzl",
+    shell = "bash",
+)
+
+# Default is sh (POSIX-compliant)
+run_command(
+    command = "ls -la",
+    # shell = "sh" is the default
+)
+```
+
+## Combining Operations
+
+An `operations` function can return multiple operations:
+
+```starlark
+def migration_ops(ctx):
+    return [
+        # Step 1: Backup
+        run_command(
+            command = "cp MODULE.bazel MODULE.bazel.bak",
+            description = "Backup MODULE.bazel",
+        ),
+
+        # Step 2: Update version
+        replace_in_file(
+            file = "MODULE.bazel",
+            old = 'version = "1.0.0"',
+            new = 'version = "2.0.0"',
+        ),
+
+        # Step 3: Format
+        run_command(
+            command = "buildifier MODULE.bazel",
+            description = "Format MODULE.bazel",
+        ),
+
+        # Step 4: Verify
+        run_command(
+            command = "bazel build //...",
+            description = "Verify build still works",
+            allow_failure = True,
+        ),
+    ]
+```
+
+Operations execute in order within a step.

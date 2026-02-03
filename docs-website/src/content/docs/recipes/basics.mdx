@@ -1,0 +1,188 @@
+---
+title: Recipe Basics
+description: Understanding the bazelbump recipe DSL
+---
+
+Recipes are Starlark files that define multi-step transformations. This page covers the core concepts.
+
+## Recipe Structure
+
+Every recipe has three parts:
+
+```starlark
+# 1. Implementation functions
+def my_scan(ctx):
+    return [...]
+
+def my_ops(ctx):
+    return [...]
+
+# 2. Recipe declaration
+recipe(
+    name = "my-recipe",
+    version = "1.0.0",
+    description = "What this recipe does",
+    steps = [
+        # 3. Step definitions
+        scan(...),
+        edit(...),
+    ],
+)
+```
+
+## The `recipe()` Function
+
+```starlark
+recipe(
+    name = "string",           # Required: unique identifier
+    version = "string",        # Required: semantic version
+    description = "string",    # Required: human-readable description
+    steps = [...],             # Required: list of scan/edit steps
+)
+```
+
+## Step Types
+
+### Scan Steps
+
+Scan steps analyze the project without making changes:
+
+```starlark
+scan(
+    id = "string",             # Required: unique step ID
+    name = "string",           # Required: display name
+    description = "string",    # Optional: detailed description
+    impl = function,           # Required: function returning results
+)
+```
+
+The `impl` function receives a context and returns a list of results:
+
+```starlark
+def my_scan(ctx):
+    results = []
+    for f in glob("**/*.bzl"):
+        content = read_file(f)
+        if "deprecated" in content:
+            results.append({"file": f, "reason": "contains deprecated"})
+    return results
+```
+
+### Edit Steps
+
+Edit steps make changes to the project:
+
+```starlark
+edit(
+    id = "string",             # Required: unique step ID
+    name = "string",           # Required: display name
+    description = "string",    # Optional: detailed description
+    depends_on = ["id1"],      # Optional: steps that must run first
+    operations = function,     # Required: function returning operations
+)
+```
+
+The `operations` function receives a context and returns a list of operations:
+
+```starlark
+def my_ops(ctx):
+    return [
+        write_file(
+            file = "output.txt",
+            content = "Hello",
+        ),
+    ]
+```
+
+## Step Dependencies
+
+Steps run in order, but `depends_on` makes dependencies explicit:
+
+```starlark
+steps = [
+    scan(id = "analyze", ...),
+    scan(id = "check-deps", ...),
+    edit(
+        id = "fix",
+        depends_on = ["analyze", "check-deps"],  # Runs after both
+        ...
+    ),
+]
+```
+
+Dependencies serve two purposes:
+1. **Execution order**: Ensure prerequisites complete first
+2. **Data access**: Access results from completed steps via `ctx.results`
+
+## The Context Object
+
+Both `impl` and `operations` functions receive a `ctx` object:
+
+```starlark
+def my_function(ctx):
+    # Access results from previous steps
+    analyze_results = ctx.results.get("analyze", [])
+
+    # Access command output (if using capture=True)
+    cmd_output = ctx.outputs.get("step-id", {})
+
+    # Access recipe metadata
+    recipe_name = ctx.recipe.name
+
+    return [...]
+```
+
+## Execution Flow
+
+1. **Parse**: Starlark file is parsed and validated
+2. **Build graph**: Steps are ordered by dependencies
+3. **Execute scans**: All scan steps run, building `ctx.results`
+4. **Execute edits**: Edit steps run in order, respecting `--dry-run`
+
+In dry-run mode, edit operations are computed but not applied.
+
+## Complete Example
+
+```starlark
+def find_old_deps(ctx):
+    """Find files using old dependency format."""
+    results = []
+    for f in glob("**/BUILD.bazel"):
+        content = read_file(f, default="")
+        if "//external:" in content:
+            results.append({"file": f, "content": content})
+    return results
+
+def migrate_ops(ctx):
+    """Generate migration operations."""
+    ops = []
+    for item in ctx.results.get("find-old", []):
+        ops.append(
+            replace_in_file(
+                file = item["file"],
+                old = "//external:",
+                new = "@",
+                description = "Migrate external dep format",
+            )
+        )
+    return ops
+
+recipe(
+    name = "migrate-external-deps",
+    version = "1.0.0",
+    description = "Migrate //external: to @ format",
+    steps = [
+        scan(
+            id = "find-old",
+            name = "Find old format",
+            impl = find_old_deps,
+        ),
+        edit(
+            id = "migrate",
+            name = "Migrate to new format",
+            depends_on = ["find-old"],
+            operations = migrate_ops,
+        ),
+    ],
+)
+```

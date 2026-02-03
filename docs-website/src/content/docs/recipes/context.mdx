@@ -1,0 +1,219 @@
+---
+title: Context & Outputs
+description: Sharing data between recipe steps
+---
+
+The context object (`ctx`) provides access to data from previous steps and recipe metadata.
+
+## Context Structure
+
+```starlark
+def my_function(ctx):
+    # Results from scan steps
+    ctx.results      # dict[step_id, list[dict]]
+
+    # Captured command output
+    ctx.outputs      # dict[step_id, CommandResult]
+
+    # Recipe metadata
+    ctx.recipe.name
+    ctx.recipe.version
+    ctx.recipe.description
+```
+
+## Accessing Scan Results
+
+Scan steps store their results in `ctx.results`:
+
+```starlark
+def scan_modules(ctx):
+    return [
+        {"file": "MODULE.bazel", "version": "1.0.0"},
+        {"file": "sub/MODULE.bazel", "version": "1.1.0"},
+    ]
+
+def update_ops(ctx):
+    # Get results from the scan step
+    modules = ctx.results.get("scan-modules", [])
+
+    ops = []
+    for mod in modules:
+        file = mod["file"]
+        version = mod["version"]
+
+        ops.append(
+            replace_in_file(
+                file = file,
+                old = 'version = "' + version + '"',
+                new = 'version = "2.0.0"',
+            )
+        )
+
+    return ops
+
+recipe(
+    steps = [
+        scan(id = "scan-modules", impl = scan_modules, ...),
+        edit(id = "update", depends_on = ["scan-modules"], operations = update_ops, ...),
+    ],
+)
+```
+
+## Accessing Command Output
+
+When using `capture = True` in `run_command`, output is stored in `ctx.outputs`:
+
+```starlark
+def query_deps(ctx):
+    return [
+        run_command(
+            command = "bazel query 'deps(//main:app)'",
+            capture = True,
+            echo = True,
+        ),
+    ]
+
+def process_deps(ctx):
+    # Get captured output from the query step
+    result = ctx.outputs.get("query", {})
+
+    stdout = result.get("stdout", "")
+    stderr = result.get("stderr", "")
+    exit_code = result.get("exit_code", 0)
+
+    if exit_code != 0:
+        # Query failed, return empty ops
+        return []
+
+    # Parse the output
+    deps = stdout.strip().split("\n")
+
+    # Generate operations based on query results
+    ops = []
+    for dep in deps:
+        if dep.startswith("@"):
+            ops.append(...)
+
+    return ops
+
+recipe(
+    steps = [
+        edit(id = "query", operations = query_deps, ...),
+        edit(id = "process", depends_on = ["query"], operations = process_deps, ...),
+    ],
+)
+```
+
+## CommandResult Structure
+
+Captured command output has this structure:
+
+```python
+{
+    "stdout": "string",      # Standard output (captured)
+    "stderr": "string",      # Standard error (captured)
+    "exit_code": 0,          # Process exit code
+    "command": "string"      # The command that was executed
+}
+```
+
+## Multiple Scan Steps
+
+Access results from multiple scan steps:
+
+```starlark
+def combined_ops(ctx):
+    # Results from different scans
+    build_files = ctx.results.get("scan-builds", [])
+    bzl_files = ctx.results.get("scan-bzl", [])
+    workspace = ctx.results.get("scan-workspace", [])
+
+    ops = []
+
+    # Process BUILD files
+    for item in build_files:
+        ops.append(...)
+
+    # Process .bzl files
+    for item in bzl_files:
+        ops.append(...)
+
+    # Process WORKSPACE
+    for item in workspace:
+        ops.append(...)
+
+    return ops
+```
+
+## Chaining Edit Steps
+
+Edit steps can depend on other edit steps to access their captured output:
+
+```starlark
+steps = [
+    edit(
+        id = "fetch-versions",
+        operations = lambda ctx: [
+            run_command(
+                command = "curl -s https://api.example.com/versions",
+                capture = True,
+            ),
+        ],
+    ),
+    edit(
+        id = "apply-updates",
+        depends_on = ["fetch-versions"],
+        operations = lambda ctx: [
+            # ctx.outputs["fetch-versions"] contains the API response
+            ...
+        ],
+    ),
+]
+```
+
+## Best Practices
+
+### Check for empty results
+
+```starlark
+def my_ops(ctx):
+    results = ctx.results.get("scan-step", [])
+
+    if not results:
+        # Nothing to do
+        return []
+
+    # Process results...
+```
+
+### Handle missing keys
+
+```starlark
+def my_ops(ctx):
+    # Use .get() with default values
+    results = ctx.results.get("maybe-missing", [])
+    output = ctx.outputs.get("maybe-missing", {})
+
+    stdout = output.get("stdout", "")
+    exit_code = output.get("exit_code", -1)
+```
+
+### Include context in results
+
+```starlark
+def detailed_scan(ctx):
+    results = []
+
+    for f in glob("**/*.bzl"):
+        content = read_file(f, default="")
+
+        # Include enough context for edit steps
+        results.append({
+            "file": f,
+            "content": content,            # Full content if needed
+            "has_load": "load(" in content,
+            "line_count": len(content.split("\n")),
+        })
+
+    return results
+```

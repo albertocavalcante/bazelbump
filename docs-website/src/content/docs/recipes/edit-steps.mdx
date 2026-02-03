@@ -1,0 +1,195 @@
+---
+title: Edit Steps
+description: Making changes to your project
+---
+
+Edit steps apply changes to the project. In dry-run mode, they show what would change without modifying files.
+
+## Basic Edit
+
+```starlark
+def format_ops(ctx):
+    return [
+        run_command(
+            command = "buildifier -mode=fix .",
+            description = "Format all Starlark files",
+        ),
+    ]
+
+edit(
+    id = "format",
+    name = "Format files",
+    operations = format_ops,
+)
+```
+
+## Edit Step Definition
+
+```starlark
+edit(
+    id = "string",             # Required: unique identifier
+    name = "string",           # Required: display name
+    description = "string",    # Optional: detailed description
+    depends_on = ["id", ...],  # Optional: prerequisite step IDs
+    operations = function,     # Required: function returning operations
+)
+```
+
+## Operations Function
+
+The `operations` function returns a list of operations:
+
+```starlark
+def my_ops(ctx) -> list[Operation]:
+    """
+    Args:
+        ctx: Context with results from scan steps
+
+    Returns:
+        List of operation objects (write_file, replace_in_file, run_command, etc.)
+    """
+    return [...]
+```
+
+## Using Scan Results
+
+Edit steps typically use data from scan steps:
+
+```starlark
+def find_outdated(ctx):
+    results = []
+    for f in glob("**/MODULE.bazel"):
+        content = read_file(f, default="")
+        if 'version = "1.0.0"' in content:
+            results.append({"file": f, "content": content})
+    return results
+
+def update_ops(ctx):
+    ops = []
+
+    # Access scan results
+    for item in ctx.results.get("find-outdated", []):
+        ops.append(
+            replace_in_file(
+                file = item["file"],
+                old = 'version = "1.0.0"',
+                new = 'version = "2.0.0"',
+                description = "Update version in " + item["file"],
+            )
+        )
+
+    return ops
+
+recipe(
+    name = "update-version",
+    steps = [
+        scan(id = "find-outdated", impl = find_outdated, ...),
+        edit(id = "update", depends_on = ["find-outdated"], operations = update_ops, ...),
+    ],
+)
+```
+
+## Multiple Dependencies
+
+Edit steps can depend on multiple scans:
+
+```starlark
+def combined_ops(ctx):
+    ops = []
+
+    # Data from first scan
+    for item in ctx.results.get("scan-modules", []):
+        ops.append(...)
+
+    # Data from second scan
+    for item in ctx.results.get("scan-workspaces", []):
+        ops.append(...)
+
+    return ops
+
+edit(
+    id = "fix-all",
+    depends_on = ["scan-modules", "scan-workspaces"],
+    operations = combined_ops,
+)
+```
+
+## Edit Chains
+
+Edit steps can depend on other edit steps:
+
+```starlark
+steps = [
+    scan(id = "analyze", ...),
+
+    edit(
+        id = "step-1",
+        name = "First migration",
+        depends_on = ["analyze"],
+        operations = step1_ops,
+    ),
+
+    edit(
+        id = "step-2",
+        name = "Second migration",
+        depends_on = ["step-1"],  # Runs after step-1 completes
+        operations = step2_ops,
+    ),
+
+    edit(
+        id = "cleanup",
+        name = "Cleanup",
+        depends_on = ["step-2"],
+        operations = cleanup_ops,
+    ),
+]
+```
+
+## Conditional Operations
+
+Return different operations based on scan results:
+
+```starlark
+def conditional_ops(ctx):
+    results = ctx.results.get("analyze", [])
+
+    if not results:
+        # No work to do
+        return []
+
+    ops = []
+
+    if any(r.get("needs_major_update") for r in results):
+        ops.append(
+            run_command(
+                command = "bazel clean",
+                description = "Clean before major update",
+            )
+        )
+
+    for item in results:
+        ops.append(
+            replace_in_file(
+                file = item["file"],
+                old = item["old_version"],
+                new = item["new_version"],
+            )
+        )
+
+    return ops
+```
+
+## Dry-Run Behavior
+
+In dry-run mode (`--dry-run`):
+
+- File operations (`write_file`, `replace_in_file`) show diffs but don't modify files
+- Command operations (`run_command`) show what would run but don't execute
+- The `ctx.outputs` from commands are not populated
+
+Always test with `--dry-run` first:
+
+```bash
+bazelbump recipe run my-recipe.star --dry-run
+bazelbump recipe run my-recipe.star  # Apply for real
+```

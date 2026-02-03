@@ -1,0 +1,170 @@
+---
+title: CLI Commands
+description: bazelbump command-line interface reference
+---
+
+## Global Options
+
+```bash
+bazelbump [options] <command> [args]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--version` | Print version and exit |
+| `--help, -h` | Show help |
+| `-v, --verbose` | Enable verbose output |
+| `--no-color` | Disable colored output |
+
+## recipe
+
+Manage and run Starlark recipes.
+
+### recipe list
+
+List available recipes:
+
+```bash
+bazelbump recipe list
+```
+
+Searches for recipes in:
+1. Built-in recipes (bundled with bazelbump)
+2. Project recipes (`./recipes/`)
+3. User recipes (`~/.config/bazelbump/recipes/`)
+
+### recipe run
+
+Run a recipe:
+
+```bash
+bazelbump recipe run <recipe> [options]
+```
+
+Options:
+
+| Option | Description |
+|--------|-------------|
+| `--dry-run` | Preview changes without applying |
+| `--dir PATH` | Run in specified directory |
+| `-v, --verbose` | Show detailed step output |
+
+Examples:
+
+```bash
+# Run by name (discovered recipe)
+bazelbump recipe run format-buildifier
+
+# Run by path
+bazelbump recipe run ./my-recipe.star
+
+# Preview changes first
+bazelbump recipe run upgrade-rules-go --dry-run
+
+# Run in another directory
+bazelbump recipe run format --dir /path/to/project
+```
+
+### recipe validate
+
+Validate a recipe without executing:
+
+```bash
+bazelbump recipe validate <recipe>
+```
+
+Checks:
+- Starlark syntax
+- Required fields (`name`, `version`, `steps`)
+- Step dependencies
+- Operation validity
+
+### recipe show
+
+Show recipe details:
+
+```bash
+bazelbump recipe show <recipe>
+```
+
+Displays:
+- Name, version, description
+- Steps with IDs and dependencies
+- Estimated changes
+
+## builtins
+
+Explore available Starlark builtins.
+
+### builtins list
+
+List all builtins by category:
+
+```bash
+bazelbump builtins list
+```
+
+Categories:
+- **Steps**: `recipe`, `scan`, `edit`, `verify`
+- **Operations**: `ensure_load`, `replace_text`, `run_command`, etc.
+- **File I/O**: `read_file`, `glob`, `file_exists`, etc.
+- **Utilities**: `fail`, `warn`, `skip`
+- **Regex**: `re.match`, `re.findall`, `re.sub`, `re.split`
+
+### builtins help
+
+Show detailed help for a builtin:
+
+```bash
+bazelbump builtins help <name>
+```
+
+Example:
+
+```bash
+bazelbump builtins help run_command
+```
+
+Output:
+```
+run_command(command, description=None, timeout="5m", ...)
+
+Execute a shell command with optional echo, capture, and environment
+
+ARGUMENTS
+  command      str (required)  Shell command to execute
+  description  str             Human-readable description
+  timeout      str             Command timeout (default: "5m")
+  ...
+
+BEHAVIOR
+  - Executes command via the specified shell
+  - echo=True prints command before execution (like set -x)
+  ...
+
+EXAMPLE
+  run_command(
+      command = "buildifier -mode=fix .",
+      echo = True,
+  )
+```
+
+## analyze
+
+Analyze a Bazel project (experimental).
+
+```bash
+bazelbump analyze [options]
+```
+
+Options:
+
+| Option | Description |
+|--------|-------------|
+| `--format` | Output format: `text`, `json` |
+| `--dir PATH` | Project directory |
+
+Reports:
+- Detected native rule usage
+- Module.bazel status
+- Recommended migrations

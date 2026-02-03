@@ -1,0 +1,199 @@
+---
+title: Scan Steps
+description: Analyzing projects without making changes
+---
+
+Scan steps gather information about the project. They run in both normal and dry-run modes.
+
+## Basic Scan
+
+```starlark
+def find_build_files(ctx):
+    results = []
+    for f in glob("**/BUILD.bazel"):
+        results.append({"file": f})
+    return results
+
+scan(
+    id = "find-builds",
+    name = "Find BUILD files",
+    impl = find_build_files,
+)
+```
+
+## Scan Function Signature
+
+```starlark
+def scan_function(ctx) -> list[dict]:
+    """
+    Args:
+        ctx: Context object with results from previous steps
+
+    Returns:
+        List of dictionaries. Each dict represents one finding.
+    """
+    return [{"key": "value"}, ...]
+```
+
+## Using Glob
+
+The `glob()` builtin finds files matching patterns:
+
+```starlark
+def find_starlark(ctx):
+    results = []
+
+    # Multiple patterns
+    patterns = [
+        "**/BUILD",
+        "**/BUILD.bazel",
+        "**/*.bzl",
+        "**/MODULE.bazel",
+    ]
+
+    for pattern in patterns:
+        # Exclude bazel output directories
+        for f in glob(pattern, exclude=["bazel-*/**", ".git/**"]):
+            results.append({"file": f})
+
+    return results
+```
+
+## Reading File Contents
+
+Use `read_file()` to inspect file contents:
+
+```starlark
+def find_with_content(ctx):
+    results = []
+
+    for f in glob("**/*.bzl"):
+        # default="" prevents errors for unreadable files
+        content = read_file(f, default="")
+
+        if "load(" in content:
+            # Include relevant data for later steps
+            results.append({
+                "file": f,
+                "content": content,
+                "load_count": content.count("load("),
+            })
+
+    return results
+```
+
+## Pattern Matching in Content
+
+```starlark
+def find_deprecated_rules(ctx):
+    results = []
+
+    deprecated_patterns = [
+        "native.cc_library",
+        "native.java_library",
+        "@io_bazel_rules_go",
+    ]
+
+    for f in glob("**/BUILD.bazel"):
+        content = read_file(f, default="")
+
+        for pattern in deprecated_patterns:
+            if pattern in content:
+                results.append({
+                    "file": f,
+                    "pattern": pattern,
+                })
+                break  # One entry per file
+
+    return results
+```
+
+## Aggregating Results
+
+Scan results can include computed data:
+
+```starlark
+def analyze_dependencies(ctx):
+    """Analyze dependency graph statistics."""
+    total_deps = 0
+    files_with_deps = 0
+
+    for f in glob("**/BUILD.bazel"):
+        content = read_file(f, default="")
+        dep_count = content.count("deps = [")
+
+        if dep_count > 0:
+            files_with_deps += 1
+            total_deps += dep_count
+
+    return [{
+        "total_files_with_deps": files_with_deps,
+        "total_dep_declarations": total_deps,
+        "summary": True,  # Flag for display formatting
+    }]
+```
+
+## Accessing Previous Results
+
+Scan steps can build on earlier scans:
+
+```starlark
+def first_scan(ctx):
+    return [{"file": f} for f in glob("**/*.bzl")]
+
+def second_scan(ctx):
+    # Access results from first_scan
+    files = ctx.results.get("first", [])
+
+    results = []
+    for item in files:
+        content = read_file(item["file"], default="")
+        if len(content) > 10000:
+            results.append({
+                "file": item["file"],
+                "size": len(content),
+                "large": True,
+            })
+
+    return results
+
+recipe(
+    name = "find-large-bzl",
+    steps = [
+        scan(id = "first", name = "Find .bzl files", impl = first_scan),
+        scan(id = "second", name = "Filter large files", impl = second_scan),
+    ],
+)
+```
+
+## Best Practices
+
+### Return structured data
+
+```starlark
+# Good: structured data for later steps
+return [{"file": f, "issue": "deprecated", "line": 42}]
+
+# Avoid: losing context
+return [f]  # Just the filename
+```
+
+### Use default="" with read_file
+
+```starlark
+# Good: handles missing/unreadable files
+content = read_file(f, default="")
+
+# Risky: may fail on permission errors
+content = read_file(f)
+```
+
+### Exclude build outputs
+
+```starlark
+# Good: skip generated files
+glob("**/*.bzl", exclude=["bazel-*/**", ".git/**"])
+
+# Risky: may scan output directories
+glob("**/*.bzl")
+```

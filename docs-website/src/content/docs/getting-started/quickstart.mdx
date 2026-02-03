@@ -1,0 +1,115 @@
+---
+title: Quick Start
+description: Run your first bazelbump recipe
+---
+
+This guide walks through running an existing recipe and understanding the output.
+
+## List Available Recipes
+
+bazelbump discovers recipes in several locations:
+
+```bash
+bazelbump recipe list
+```
+
+Output:
+
+```
+Built-in recipes:
+  format-buildifier    Format Starlark files using buildifier
+
+Project recipes (./recipes/):
+  upgrade-rules-go     Upgrade rules_go to latest version
+
+User recipes (~/.config/bazelbump/recipes/):
+  my-company-standards Apply company Starlark standards
+```
+
+## Run a Recipe (Dry-Run)
+
+Always preview changes first:
+
+```bash
+bazelbump recipe run format-buildifier --dry-run
+```
+
+Output:
+
+```
+=== Recipe: format-buildifier v1.0.0 ===
+Format Starlark files using buildifier
+
+=== Step 1/2: find-files (scan) ===
+Found 12 Starlark files:
+  - MODULE.bazel
+  - BUILD.bazel
+  - src/BUILD.bazel
+  - src/lib/BUILD.bazel
+  ... (8 more)
+
+=== Step 2/2: format (edit) ===
+[DRY-RUN] Would execute: buildifier -mode=fix .
+```
+
+## Apply Changes
+
+When satisfied with the preview, run without `--dry-run`:
+
+```bash
+bazelbump recipe run format-buildifier
+```
+
+Output:
+
+```
+=== Recipe: format-buildifier v1.0.0 ===
+Format Starlark files using buildifier
+
+=== Step 1/2: find-files (scan) ===
+Found 12 Starlark files
+
+=== Step 2/2: format (edit) ===
+$ buildifier -mode=fix .
+Fixed 3 files:
+  - src/BUILD.bazel
+  - src/lib/BUILD.bazel
+  - tools/BUILD.bazel
+
+=== Recipe completed successfully ===
+```
+
+## Verbose Output
+
+For more detail, use `-v`:
+
+```bash
+bazelbump recipe run format-buildifier -v
+```
+
+This shows:
+- Full file lists from scan steps
+- Exact commands being executed
+- Timing information for each step
+
+## Run a Specific Recipe File
+
+Run a recipe directly by path:
+
+```bash
+bazelbump recipe run ./my-recipes/custom-migration.star --dry-run
+```
+
+## Common Flags
+
+| Flag | Description |
+|------|-------------|
+| `--dry-run` | Preview changes without applying |
+| `-v, --verbose` | Show detailed output |
+| `--dir PATH` | Run in a specific directory |
+| `--no-color` | Disable colored output |
+
+## Next Steps
+
+- [Your First Recipe](/bazelbump/getting-started/first-recipe/) - Write a custom recipe
+- [Recipe Basics](/bazelbump/recipes/basics/) - Understand the recipe DSL

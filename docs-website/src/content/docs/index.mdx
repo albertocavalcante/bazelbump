@@ -1,0 +1,101 @@
+---
+title: bazelbump
+description: Automate Bazel dependency upgrades with Starlark recipes
+template: splash
+hero:
+  tagline: Stop manually editing MODULE.bazel. Write recipes that upgrade dependencies, fix issues, and transform your Bazel projects.
+  actions:
+    - text: Get Started
+      link: /bazelbump/getting-started/installation/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/anthropics/bazelbump
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+## The Problem
+
+Bazel dependency upgrades are painful:
+
+- **Manual edits** to MODULE.bazel, WORKSPACE, and BUILD files
+- **Breaking changes** that require coordinated updates across many files
+- **No automation** - each upgrade is a bespoke, error-prone process
+- **Hard to test** - dry-run modes are inconsistent or missing
+
+## The Solution
+
+bazelbump provides a recipe system for codifying upgrade patterns:
+
+```starlark
+recipe(
+    name = "upgrade-rules-go",
+    version = "1.0.0",
+    description = "Upgrade rules_go to latest version",
+    steps = [
+        scan(
+            id = "find-deps",
+            name = "Find rules_go usage",
+            impl = find_rules_go,
+        ),
+        edit(
+            id = "update-version",
+            name = "Update MODULE.bazel",
+            depends_on = ["find-deps"],
+            operations = update_ops,
+        ),
+    ],
+)
+```
+
+<CardGrid>
+  <Card title="Starlark DSL" icon="document">
+    Write recipes in Starlark - the same language as your BUILD files. No new syntax to learn.
+  </Card>
+  <Card title="Dry-Run First" icon="approve-check">
+    Preview all changes before applying. See exactly what will be modified.
+  </Card>
+  <Card title="Composable Steps" icon="puzzle">
+    Build complex migrations from simple scan and edit steps with dependency tracking.
+  </Card>
+  <Card title="Shell Integration" icon="terminal">
+    Run external tools like buildifier, skyfmt, or custom scripts as part of your recipe.
+  </Card>
+</CardGrid>
+
+## Quick Example
+
+Format all Starlark files with buildifier:
+
+```starlark
+def format_ops(ctx):
+    return [
+        run_command(
+            command = "buildifier -mode=fix .",
+            description = "Format with buildifier",
+            echo = True,
+        ),
+    ]
+
+recipe(
+    name = "format",
+    version = "1.0.0",
+    steps = [
+        edit(
+            id = "format",
+            name = "Format files",
+            operations = format_ops,
+        ),
+    ],
+)
+```
+
+```bash
+# Preview changes
+bazelbump recipe run format.star --dry-run
+
+# Apply changes
+bazelbump recipe run format.star
+```

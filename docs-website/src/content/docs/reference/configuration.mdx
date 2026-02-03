@@ -1,0 +1,160 @@
+---
+title: Configuration
+description: Configure bazelbump behavior
+---
+
+## Recipe Discovery
+
+bazelbump discovers recipes from multiple locations in order:
+
+1. **Built-in recipes**: Bundled with bazelbump
+2. **Project recipes**: `./recipes/` in current directory
+3. **User recipes**: `~/.config/bazelbump/recipes/`
+
+Later sources override earlier ones (user recipes take precedence).
+
+## Recipe File Naming
+
+Recipes are identified by filename:
+
+```
+recipes/
+├── format-buildifier.star    # Name: format-buildifier
+├── upgrade-rules-go.star     # Name: upgrade-rules-go
+└── migrate-native.star       # Name: migrate-native
+```
+
+The `.star` extension is required.
+
+## Recipe Structure
+
+Every recipe file must call `recipe()` exactly once:
+
+```starlark
+recipe(
+    name = "my-recipe",           # Must match filename (without .star)
+    version = "1.0.0",            # Semantic version
+    description = "...",          # Human-readable description
+    steps = [...],                # List of steps
+)
+```
+
+### Optional Recipe Fields
+
+```starlark
+recipe(
+    # ... required fields ...
+
+    # Bazel version constraints
+    min_bazel_version = "7.0.0",
+    max_bazel_version = "8.0.0",
+
+    # Failure handling
+    on_failure = "rollback",  # "rollback", "stop", or "continue"
+)
+```
+
+### on_failure Modes
+
+| Mode | Behavior |
+|------|----------|
+| `rollback` | Undo all changes on failure (default) |
+| `stop` | Stop execution, keep partial changes |
+| `continue` | Log error, continue with next step |
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `BAZELBUMP_NO_COLOR` | Disable colored output |
+| `BAZELBUMP_VERBOSE` | Enable verbose output |
+| `BAZELBUMP_RECIPES_DIR` | Additional recipes directory |
+
+## Project Configuration
+
+Create `.bazelbump.yaml` in your project root:
+
+```yaml
+# Recipe search paths (in addition to defaults)
+recipe_paths:
+  - ./custom-recipes
+  - /shared/recipes
+
+# Default options for recipe run
+defaults:
+  verbose: false
+  dry_run: false
+
+# Project-specific settings
+project:
+  # Skip these patterns in scans
+  exclude_patterns:
+    - "bazel-*/**"
+    - ".git/**"
+    - "third_party/**"
+```
+
+## Recipe Execution Context
+
+### Working Directory
+
+Recipes execute from the project root. Paths in recipes are relative to this root:
+
+```starlark
+# These are equivalent when run from project root
+glob("**/BUILD")
+glob("/absolute/path/to/project/**/BUILD")
+```
+
+### Sandboxing
+
+File operations are sandboxed to the project directory:
+
+```starlark
+# OK: within project
+read_file("src/BUILD")
+
+# Error: outside project
+read_file("../other-project/BUILD")
+```
+
+### Environment
+
+Commands executed via `run_command()` inherit the user's environment. Additional variables can be set:
+
+```starlark
+run_command(
+    command = "npm install",
+    env = {
+        "NODE_ENV": "production",
+        "CI": "true",
+    },
+)
+```
+
+## Dry-Run Mode
+
+When `--dry-run` is specified:
+
+- File operations show diffs but don't modify files
+- Commands show what would run but don't execute
+- `ctx.outputs` from commands are empty (no captured output)
+
+Use dry-run mode to preview all changes:
+
+```bash
+bazelbump recipe run my-recipe --dry-run
+```
+
+## Verbose Mode
+
+When `-v` or `--verbose` is specified:
+
+- Full file lists from scan steps
+- Command stdout/stderr
+- Timing information
+- Debug messages
+
+```bash
+bazelbump recipe run my-recipe -v
+```

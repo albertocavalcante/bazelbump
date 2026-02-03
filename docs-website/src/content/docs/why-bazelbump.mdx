@@ -1,0 +1,96 @@
+---
+title: Why bazelbump?
+description: When to use bazelbump and how it compares to alternatives
+---
+
+## When to Use bazelbump
+
+bazelbump is designed for teams that:
+
+- **Manage multiple Bazel projects** and want consistent upgrade procedures
+- **Need repeatable migrations** that can be tested, reviewed, and applied across repos
+- **Want dry-run capabilities** before making changes to production codebases
+- **Prefer Starlark** over learning yet another DSL or scripting language
+
+## Comparison with Alternatives
+
+### Manual upgrades
+
+| Aspect | Manual | bazelbump |
+|--------|--------|-----------|
+| Repeatability | Low - depends on documentation | High - recipe is the documentation |
+| Error-prone | Yes - easy to miss files | No - recipe finds all matches |
+| Dry-run | No | Yes |
+| Shareable | Wiki docs | Recipe files in version control |
+
+### Shell scripts
+
+| Aspect | Shell scripts | bazelbump |
+|--------|--------------|-----------|
+| Language | Bash | Starlark |
+| File operations | sed, awk, grep | `read_file()`, `write_file()`, `replace_in_file()` |
+| Dry-run | Manual implementation | Built-in |
+| Dependency tracking | Manual | Automatic via `depends_on` |
+| Integration | Any tool | Any tool via `run_command()` |
+
+Shell scripts work fine for simple tasks. bazelbump adds value when you need structured multi-step operations with proper dry-run support.
+
+### Buildozer
+
+[Buildozer](https://github.com/bazelbuild/buildtools/blob/master/buildozer/README.md) is excellent for targeted BUILD file edits:
+
+```bash
+buildozer 'add deps //new:dep' //pkg:target
+```
+
+bazelbump complements buildozer:
+
+```starlark
+run_command(
+    command = "buildozer 'add deps //new:dep' //pkg:target",
+    description = "Add new dependency",
+)
+```
+
+Use buildozer directly for quick one-off edits. Use bazelbump when you need to:
+- Combine buildozer with other operations
+- Run the same migration across multiple repos
+- Preview changes before applying
+
+### Gazelle
+
+[Gazelle](https://github.com/bazelbuild/bazel-gazelle) auto-generates BUILD files from source code. It's essential for Go, Rust, and other language ecosystems.
+
+bazelbump doesn't replace Gazelle. Instead, you might use bazelbump to:
+- Upgrade Gazelle itself across your repos
+- Run Gazelle as part of a larger migration recipe
+- Handle Gazelle edge cases that need manual intervention
+
+```starlark
+run_command(
+    command = "bazel run //:gazelle",
+    description = "Regenerate BUILD files",
+)
+```
+
+## Design Principles
+
+### 1. Starlark-native
+
+If you know BUILD files, you know bazelbump recipes. No new language to learn.
+
+### 2. Dry-run by default
+
+Running `bazelbump recipe run` with `--dry-run` shows what would change without modifying files. This is essential for reviewing changes before applying them.
+
+### 3. Explicit over implicit
+
+Recipes declare their steps, dependencies, and operations explicitly. No magic file detection or hidden behaviors.
+
+### 4. Composable
+
+Small recipes can be combined. A formatting recipe and an upgrade recipe can run together without conflict.
+
+### 5. Tool-agnostic
+
+bazelbump doesn't replace buildifier, buildozer, or Gazelle. It orchestrates them via `run_command()` and adds the recipe layer on top.

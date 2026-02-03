@@ -1,0 +1,102 @@
+---
+title: Introduction
+description: What is bazelbump and why does it exist?
+---
+
+bazelbump is a command-line tool for automating Bazel dependency upgrades and project transformations using Starlark recipes.
+
+## The Upgrade Problem
+
+Every Bazel project eventually faces these scenarios:
+
+1. **Dependency updates**: A new version of `rules_go`, `rules_rust`, or `rules_python` is released. You need to update the version, potentially change API calls, and verify nothing breaks.
+
+2. **Breaking changes**: A major Bazel release deprecates features you use. You need to find all usages and migrate them.
+
+3. **Codemod operations**: You want to rename a target, move files, or refactor your build graph. This touches dozens of files.
+
+4. **Formatting consistency**: You want to enforce consistent formatting across all Starlark files, but different tools (buildifier, skyfmt) produce different output.
+
+The traditional approach is manual: grep for patterns, edit files by hand, hope you didn't miss anything. This doesn't scale.
+
+## How bazelbump Helps
+
+bazelbump provides a recipe system that lets you:
+
+### 1. Codify upgrade patterns
+
+Instead of documenting "how to upgrade rules_go" in a wiki, write a recipe that does it:
+
+```starlark
+def find_rules_go_usage(ctx):
+    """Scan for rules_go dependencies."""
+    results = []
+    for f in glob("**/MODULE.bazel"):
+        content = read_file(f)
+        if "rules_go" in content:
+            results.append({"file": f, "content": content})
+    return results
+```
+
+### 2. Preview before applying
+
+Every recipe supports `--dry-run` mode. See exactly what changes will be made before committing:
+
+```bash
+$ bazelbump recipe run upgrade-rules-go.star --dry-run
+
+=== Step: find-deps ===
+Found 3 files with rules_go usage:
+  - MODULE.bazel
+  - third_party/BUILD.bazel
+  - tools/go/BUILD.bazel
+
+=== Step: update-version ===
+Would modify MODULE.bazel:
+  - bazel_dep(name = "rules_go", version = "0.45.0")
+  + bazel_dep(name = "rules_go", version = "0.46.0")
+```
+
+### 3. Compose complex migrations
+
+Multi-step recipes with dependencies let you build sophisticated migrations:
+
+```starlark
+recipe(
+    name = "migrate-to-bzlmod",
+    steps = [
+        scan(id = "analyze", impl = analyze_workspace),
+        edit(id = "create-module", depends_on = ["analyze"], operations = create_module_bazel),
+        edit(id = "update-builds", depends_on = ["create-module"], operations = update_build_files),
+        edit(id = "cleanup", depends_on = ["update-builds"], operations = remove_workspace),
+    ],
+)
+```
+
+### 4. Integrate external tools
+
+Run buildifier, skyfmt, bazel query, or any shell command:
+
+```starlark
+run_command(
+    command = "bazel query 'deps(//...)'",
+    capture = True,  # Store output in ctx.outputs
+    echo = True,     # Show command being executed
+)
+```
+
+## Architecture
+
+bazelbump follows a three-phase execution model:
+
+1. **Interpret**: Parse the Starlark recipe and build the step graph
+2. **Validate**: Check that all dependencies are satisfied and operations are valid
+3. **Execute**: Run steps in dependency order, respecting `--dry-run` mode
+
+This separation ensures that invalid recipes fail fast, before making any changes to your project.
+
+## What's Next?
+
+- [Installation](/bazelbump/getting-started/installation/) - Get bazelbump running
+- [Quick Start](/bazelbump/getting-started/quickstart/) - Run your first recipe
+- [Recipe Basics](/bazelbump/recipes/basics/) - Learn the recipe DSL

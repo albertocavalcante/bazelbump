@@ -1,0 +1,153 @@
+---
+title: Your First Recipe
+description: Write a custom bazelbump recipe
+---
+
+This guide walks through creating a recipe from scratch.
+
+## The Scenario
+
+You want to find all BUILD files that use a deprecated `load()` statement and report them. Later, you might extend this to automatically fix them.
+
+## Create the Recipe File
+
+Create `find-deprecated-loads.star`:
+
+```starlark
+# Find deprecated load statements
+#
+# Usage:
+#   bazelbump recipe run find-deprecated-loads.star
+
+def find_deprecated_loads(ctx):
+    """Scan for deprecated load statements."""
+    results = []
+
+    # Check all BUILD and .bzl files
+    patterns = ["**/BUILD", "**/BUILD.bazel", "**/*.bzl"]
+
+    for pattern in patterns:
+        for f in glob(pattern, exclude=["bazel-*/**"]):
+            content = read_file(f, default="")
+
+            # Look for the deprecated pattern
+            if '@io_bazel_rules_go//go:def.bzl' in content:
+                results.append({
+                    "file": f,
+                    "issue": "Uses deprecated @io_bazel_rules_go, should use @rules_go",
+                })
+
+    return results
+
+recipe(
+    name = "find-deprecated-loads",
+    version = "1.0.0",
+    description = "Find deprecated load() statements",
+    steps = [
+        scan(
+            id = "find",
+            name = "Find deprecated patterns",
+            description = "Scan BUILD and .bzl files for deprecated load statements",
+            impl = find_deprecated_loads,
+        ),
+    ],
+)
+```
+
+## Run the Recipe
+
+```bash
+bazelbump recipe run find-deprecated-loads.star
+```
+
+Output:
+
+```
+=== Recipe: find-deprecated-loads v1.0.0 ===
+Find deprecated load() statements
+
+=== Step 1/1: find (scan) ===
+Found 2 files with issues:
+  - src/BUILD.bazel: Uses deprecated @io_bazel_rules_go, should use @rules_go
+  - tools/go/BUILD.bazel: Uses deprecated @io_bazel_rules_go, should use @rules_go
+```
+
+## Add a Fix Step
+
+Extend the recipe to fix the issues:
+
+```starlark
+def find_deprecated_loads(ctx):
+    """Scan for deprecated load statements."""
+    results = []
+
+    for pattern in ["**/BUILD", "**/BUILD.bazel", "**/*.bzl"]:
+        for f in glob(pattern, exclude=["bazel-*/**"]):
+            content = read_file(f, default="")
+            if '@io_bazel_rules_go//go:def.bzl' in content:
+                results.append({"file": f, "content": content})
+
+    return results
+
+def fix_deprecated_loads(ctx):
+    """Generate fix operations."""
+    ops = []
+
+    # Access results from the scan step
+    for item in ctx.results.get("find", []):
+        ops.append(
+            replace_in_file(
+                file = item["file"],
+                old = "@io_bazel_rules_go//go:def.bzl",
+                new = "@rules_go//go:def.bzl",
+                description = "Update load statement in " + item["file"],
+            )
+        )
+
+    return ops
+
+recipe(
+    name = "fix-deprecated-loads",
+    version = "1.0.0",
+    description = "Fix deprecated load() statements",
+    steps = [
+        scan(
+            id = "find",
+            name = "Find deprecated patterns",
+            impl = find_deprecated_loads,
+        ),
+        edit(
+            id = "fix",
+            name = "Fix load statements",
+            depends_on = ["find"],
+            operations = fix_deprecated_loads,
+        ),
+    ],
+)
+```
+
+## Preview and Apply
+
+```bash
+# Preview changes
+bazelbump recipe run fix-deprecated-loads.star --dry-run
+
+# Apply changes
+bazelbump recipe run fix-deprecated-loads.star
+```
+
+## Recipe Structure Recap
+
+A recipe has:
+
+1. **Metadata**: `name`, `version`, `description`
+2. **Steps**: Ordered list of `scan()` and `edit()` steps
+3. **Implementation functions**: Return scan results or operations
+
+Steps can depend on each other via `depends_on`. Edit steps access scan results through `ctx.results`.
+
+## Next Steps
+
+- [Recipe Basics](/bazelbump/recipes/basics/) - Deep dive into the recipe DSL
+- [Operations](/bazelbump/recipes/operations/) - All available operations
+- [Builtins Reference](/bazelbump/reference/builtins/) - Complete function reference

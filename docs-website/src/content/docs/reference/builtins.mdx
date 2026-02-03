@@ -1,0 +1,373 @@
+---
+title: Builtins Reference
+description: Complete reference for all Starlark builtins
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+This page documents all builtin functions available in bazelbump recipes.
+
+## Steps
+
+Step functions define the structure of a recipe.
+
+### recipe
+
+Define a migration recipe.
+
+```starlark
+recipe(
+    name = "string",              # Required: unique identifier
+    version = "string",           # Required: semantic version
+    steps = [...],                # Required: list of steps
+    description = "string",       # Optional: human-readable description
+    min_bazel_version = "string", # Optional: minimum Bazel version
+    max_bazel_version = "string", # Optional: maximum Bazel version
+    on_failure = "rollback",      # Optional: "rollback", "stop", or "continue"
+)
+```
+
+### scan
+
+Scan files for patterns.
+
+```starlark
+scan(
+    id = "string",                # Required: unique step ID
+    name = "string",              # Optional: display name
+    description = "string",       # Optional: step description
+    files = [...],                # Optional: glob patterns
+    patterns = [...],             # Optional: regex patterns
+    impl = function,              # Optional: custom function(ctx)
+)
+```
+
+Either provide `files` + `patterns`, or `impl`, not both.
+
+### edit
+
+Apply transformations to files.
+
+```starlark
+edit(
+    id = "string",                # Required: unique step ID
+    operations = [...] | fn,      # Required: list or function(ctx)
+    name = "string",              # Optional: display name
+    description = "string",       # Optional: step description
+    depends_on = ["id", ...],     # Optional: prerequisite steps
+)
+```
+
+### verify
+
+Run a verification command.
+
+```starlark
+verify(
+    id = "string",                # Required: unique step ID
+    command = "string",           # Required: shell command
+    name = "string",              # Optional: display name
+    description = "string",       # Optional: step description
+    depends_on = ["id", ...],     # Optional: prerequisite steps
+    timeout = "5m",               # Optional: command timeout
+    allow_failure = False,        # Optional: continue on failure
+)
+```
+
+## Operations - BUILD Files
+
+### ensure_load
+
+Add load() statement for a rule.
+
+```starlark
+ensure_load(
+    rule = "cc_binary",           # Required: symbol to load
+    load_from = "@rules_cc//cc:defs.bzl",  # Required: .bzl path
+    file = "path/BUILD",          # Optional: specific file
+)
+```
+
+Idempotent - if load exists, this is a no-op.
+
+### ensure_load_for_detected
+
+Add loads for all rules found by a scan step.
+
+```starlark
+ensure_load_for_detected(
+    detected = scan_result,       # Required: result from scan()
+    mapping = {...},              # Optional: rule -> load path mapping
+)
+```
+
+Uses built-in mappings for native rules (`cc_*`, `py_*`, `java_*`).
+
+### remove_load
+
+Remove a symbol from load statements.
+
+```starlark
+remove_load(
+    rule = "old_rule",            # Required: symbol to remove
+    file = "path/BUILD",          # Optional: specific file
+)
+```
+
+## Operations - MODULE.bazel
+
+### ensure_bazel_dep
+
+Add bazel_dep() entry.
+
+```starlark
+ensure_bazel_dep(
+    name = "rules_cc",            # Required: dependency name
+    version = "0.1.1",            # Required: version
+    dev_dependency = False,       # Optional: dev-only flag
+)
+```
+
+### update_bazel_dep
+
+Update version of existing dependency.
+
+```starlark
+update_bazel_dep(
+    name = "rules_cc",            # Required: dependency name
+    version = "0.2.0",            # Required: new version
+)
+```
+
+### remove_bazel_dep
+
+Remove bazel_dep() entry.
+
+```starlark
+remove_bazel_dep(
+    name = "deprecated_rules",    # Required: dependency name
+)
+```
+
+## Operations - .bazelrc
+
+### ensure_flag
+
+Ensure a flag exists.
+
+```starlark
+ensure_flag(
+    flag = "incompatible_foo",    # Required: flag name
+    value = "some_value",         # Optional: flag value
+    config = "build",             # Optional: config section
+    file = ".bazelrc",            # Optional: file path
+)
+```
+
+### replace_flag
+
+Replace one flag with another.
+
+```starlark
+replace_flag(
+    old = "--old_flag",           # Required: flag to replace
+    new = "--new_flag",           # Required: replacement
+    file = ".bazelrc",            # Optional: file path
+)
+```
+
+### remove_flag
+
+Remove a flag.
+
+```starlark
+remove_flag(
+    flag = "incompatible_foo",    # Required: flag to remove
+    file = ".bazelrc",            # Optional: file path
+    config = "ci",                # Optional: specific config
+)
+```
+
+## Operations - Generic
+
+### replace_text
+
+Replace text in files.
+
+```starlark
+replace_text(
+    old = "old_name",             # Required: text to find
+    new = "new_name",             # Required: replacement
+    files = ["**/BUILD"],         # Required: glob patterns
+    regex = False,                # Optional: treat old as regex
+)
+```
+
+### copy_file
+
+Copy a file.
+
+```starlark
+copy_file(
+    src = "templates/BUILD.tpl",  # Required: source path
+    dst = "new_package/BUILD",    # Required: destination path
+)
+```
+
+### delete_file
+
+Delete a file.
+
+```starlark
+delete_file(
+    path = "deprecated/BUILD",    # Required: file path or glob
+)
+```
+
+### run_command
+
+Execute a shell command.
+
+```starlark
+run_command(
+    command = "buildifier .",     # Required: shell command
+    description = "Format",       # Optional: description
+    timeout = "5m",               # Optional: timeout
+    allow_failure = False,        # Optional: continue on failure
+    echo = False,                 # Optional: print command (set -x style)
+    capture = False,              # Optional: store output in ctx.outputs
+    env = {"KEY": "value"},       # Optional: environment variables
+    working_dir = "subdir/",      # Optional: working directory
+    shell = "sh",                 # Optional: "sh" or "bash"
+)
+```
+
+## File I/O
+
+### read_file
+
+Read file contents.
+
+```starlark
+content = read_file(
+    path = "MODULE.bazel",        # Required: file path
+    default = "",                 # Optional: default if missing
+)
+```
+
+### file_exists
+
+Check if file exists.
+
+```starlark
+exists = file_exists("MODULE.bazel")  # Returns True/False
+```
+
+### glob
+
+Find files matching pattern.
+
+```starlark
+files = glob(
+    pattern = "**/BUILD",         # Required: glob pattern
+    exclude = ["bazel-*/**"],     # Optional: exclude patterns
+)
+```
+
+### list_dir
+
+List directory contents.
+
+```starlark
+entries = list_dir(
+    path = "src",                 # Required: directory path
+    recursive = False,            # Optional: include subdirs
+)
+```
+
+### parse_build_file
+
+Parse BUILD file structure.
+
+```starlark
+bf = parse_build_file("src/BUILD")
+
+# Get all rules
+for rule in bf.rules():
+    print(rule.name, rule.kind)
+
+# Get rules of specific kind
+for rule in bf.rules("cc_*"):
+    print(rule.name)
+
+# Get load statements
+for load in bf.loads():
+    print(load.path, load.symbols)
+```
+
+## Utilities
+
+### fail
+
+Stop execution with error.
+
+```starlark
+if not file_exists("MODULE.bazel"):
+    fail("This recipe requires bzlmod")
+```
+
+### warn
+
+Print warning, continue execution.
+
+```starlark
+warn("No cc rules found, nothing to migrate")
+```
+
+### skip
+
+Skip current step.
+
+```starlark
+def my_impl(ctx):
+    if not ctx.results:
+        return skip("Nothing to process")
+```
+
+## Regex (re module)
+
+### re.match
+
+Match pattern at start.
+
+```starlark
+m = re.match(r"version = \"(\d+)\"", line)
+if m:
+    version = m.group(1)
+```
+
+### re.findall
+
+Find all matches.
+
+```starlark
+rules = re.findall(r"(cc_\w+)\s*\(", content)
+# Returns ["cc_binary", "cc_library", ...]
+```
+
+### re.sub
+
+Replace with regex.
+
+```starlark
+new = re.sub(r"version = \"\d+\"", "version = \"2\"", content)
+```
+
+### re.split
+
+Split by pattern.
+
+```starlark
+parts = re.split(r"\s*,\s*", "a, b, c")
+# Returns ["a", "b", "c"]
+```
