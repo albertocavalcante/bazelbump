@@ -11,6 +11,7 @@ Upgrading Bazel is tedious. Breaking changes are scattered across release notes,
 - **Flag Analysis** - Detects removed, deprecated, and changed flags in your `.bazelrc` files
 - **Version Diff** - Shows all flag changes between any two Bazel versions
 - **Flag Explorer** - Lists flags by category (incompatible, experimental, deprecated)
+- **Migration Recipes** - Automate complex upgrades with Starlark-based recipes
 - **CI Ready** - JSON output and meaningful exit codes for automation
 
 ## Quick Start
@@ -46,16 +47,52 @@ Example output:
 | Command | Description |
 |---------|-------------|
 | `analyze --to VERSION` | Detect issues for upgrade |
+| `apply --to VERSION` | Apply automatic fixes for detected issues |
 | `diff --from VERSION --to VERSION` | Show flag changes between versions |
 | `flags --version VERSION` | List flags with filters |
+| `recipe list\|show\|run` | Manage and run migration recipes |
 | `version` | Show bazelbump version |
 
 See [Command Reference](docs/user/commands.md) for full documentation.
+
+## Recipes
+
+Recipes automate complex multi-step migrations. For example, migrating native rules to explicit load statements for Bazel 9.0+:
+
+```bash
+# Preview changes
+bazelbump recipe run autoload-migration --dry-run
+
+# Apply changes
+bazelbump recipe run autoload-migration
+```
+
+Write custom recipes in Starlark:
+
+```starlark
+# my-recipe.star
+recipe(
+    name = "remove-deprecated-flags",
+    version = "1.0.0",
+    steps = [
+        edit(
+            id = "cleanup",
+            operations = [
+                remove_flag("experimental_enable_bzlmod"),
+            ],
+        ),
+    ],
+)
+```
+
+See [Recipes Documentation](docs/user/recipes.md) for more.
 
 ## Documentation
 
 - [Getting Started](docs/user/getting-started.md) - Installation and basic usage
 - [Command Reference](docs/user/commands.md) - All commands and options
+- [Recipes](docs/user/recipes.md) - Using migration recipes
+- [Authoring Recipes](docs/user/authoring-recipes.md) - Writing custom recipes
 - [Troubleshooting](docs/user/troubleshooting.md) - Common issues and solutions
 
 ## Requirements

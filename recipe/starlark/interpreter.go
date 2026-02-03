@@ -4,6 +4,7 @@
 package starlark
 
 import (
+	"embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,12 @@ import (
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 )
+
+// Embed the standard library files.
+// These files are available via @stdlib// loads in recipes.
+//
+//go:embed stdlib/*.star stdlib/migrations/*.star
+var stdlibFS embed.FS
 
 // Interpreter executes Starlark recipe files and produces Recipe objects.
 // It implements the interpretation phase of the three-phase execution model.
@@ -211,16 +218,28 @@ func (i *Interpreter) load(thread *starlark.Thread, module string) (starlark.Str
 		return entry.globals, entry.err
 	}
 
-	// Resolve the module path
-	modulePath, err := i.resolveLoadPath(module)
-	if err != nil {
-		return nil, err
-	}
+	var content []byte
+	var modulePath string
+	var err error
 
-	// Read the module content
-	content, err := os.ReadFile(modulePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load %q: %v", module, err)
+	// Handle @stdlib// loads specially - read from embedded filesystem
+	if strings.HasPrefix(module, "@stdlib//") {
+		content, modulePath, err = i.loadStdlib(module)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Resolve the module path
+		modulePath, err = i.resolveLoadPath(module)
+		if err != nil {
+			return nil, err
+		}
+
+		// Read the module content from filesystem
+		content, err = os.ReadFile(modulePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load %q: %v", module, err)
+		}
 	}
 
 	// Push onto load stack for cycle detection
@@ -238,13 +257,32 @@ func (i *Interpreter) load(thread *starlark.Thread, module string) (starlark.Str
 	return globals, err
 }
 
+// loadStdlib loads a module from the embedded standard library.
+// The module path should be in the form "@stdlib//path/to/file.star".
+func (i *Interpreter) loadStdlib(module string) ([]byte, string, error) {
+	// Convert @stdlib//path to stdlib/path for embedded filesystem
+	path := strings.TrimPrefix(module, "@stdlib//")
+	embedPath := "stdlib/" + path
+
+	content, err := stdlibFS.ReadFile(embedPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("stdlib module %q not found: %v", module, err)
+	}
+
+	// Return the module path as the @stdlib// path for error messages
+	return content, module, nil
+}
+
 // resolveLoadPath resolves a module path to an absolute file path.
 // Load path formats:
 //   - ./path - Relative to current file's directory
 //   - ../path - Relative to current file's directory
 //   - //path - Relative to recipe search roots
-//   - @stdlib//path - Built-in standard library (not yet implemented)
+//   - @stdlib//path - Built-in standard library (handled by loadStdlib)
 //   - ext://name - Official extension repository (not yet implemented)
+//
+// Note: @stdlib// paths are handled specially in the load() function
+// and should not reach this function.
 func (i *Interpreter) resolveLoadPath(module string) (string, error) {
 	switch {
 	case strings.HasPrefix(module, "./") || strings.HasPrefix(module, "../"):
@@ -267,8 +305,9 @@ func (i *Interpreter) resolveLoadPath(module string) (string, error) {
 		return "", fmt.Errorf("module %q not found in search paths", module)
 
 	case strings.HasPrefix(module, "@stdlib//"):
-		// Standard library - not yet implemented
-		return "", fmt.Errorf("standard library loads (@stdlib//) are not yet implemented")
+		// This should be handled in load() before reaching here
+		// If we get here, something is wrong
+		return "", fmt.Errorf("internal error: @stdlib// path should be handled by loadStdlib")
 
 	case strings.HasPrefix(module, "ext://"):
 		// Extensions - not yet implemented

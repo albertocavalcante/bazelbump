@@ -9,8 +9,10 @@ bazelbump <command> [flags]
 
 Commands:
   analyze   Analyze a project for Bazel upgrade issues
+  apply     Apply transforms to fix detected flag issues
   diff      Show flag changes between Bazel versions
   flags     List flags for a Bazel version
+  recipe    Run migration recipes
   version   Show bazelbump version
 ```
 
@@ -78,6 +80,38 @@ bazelbump analyze --to 9.0.0 --json
 ```
 
 Issue types: `removed`, `deprecated`, `default_changed`
+
+---
+
+## apply
+
+Apply automatic transforms to fix detected flag issues. This runs analysis first, then generates and applies patches.
+
+```bash
+bazelbump apply --to <version> [flags]
+```
+
+### Flags
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--to` | Yes | - | Target Bazel version |
+| `--from` | No | auto | Source Bazel version |
+| `--path` | No | `.` | Project directory |
+| `--dry-run` | No | `false` | Preview changes without applying |
+
+### Examples
+
+```bash
+# Preview what would change
+bazelbump apply --to 9.0.0 --dry-run
+
+# Apply fixes
+bazelbump apply --to 9.0.0
+
+# Specific versions
+bazelbump apply --from 7.0.0 --to 9.0.0
+```
 
 ---
 
@@ -193,6 +227,122 @@ bazelbump flags --version 9.0.0 --experimental --json | jq 'length'
   }
 ]
 ```
+
+---
+
+## recipe
+
+Run migration recipes. Recipes are multi-step Starlark scripts that automate complex migrations.
+
+```bash
+bazelbump recipe <subcommand> [flags]
+```
+
+### Subcommands
+
+#### recipe list
+
+List all available recipes.
+
+```bash
+bazelbump recipe list [--json]
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON |
+
+**Example:**
+
+```bash
+bazelbump recipe list
+```
+
+#### recipe show
+
+Show details about a specific recipe.
+
+```bash
+bazelbump recipe show <name> [--json]
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON |
+
+**Example:**
+
+```bash
+bazelbump recipe show autoload-migration
+```
+
+#### recipe run
+
+Execute a recipe.
+
+```bash
+bazelbump recipe run <name> [flags]
+bazelbump recipe run ./path/to/recipe.star [flags]
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dry-run` | `false` | Preview changes without applying |
+| `--path` | `.` | Project directory |
+| `--step` | - | Run only a specific step by ID |
+| `--verbose` | `false` | Show detailed output |
+| `--json` | `false` | Output as JSON |
+
+**Examples:**
+
+```bash
+# Preview changes
+bazelbump recipe run autoload-migration --dry-run
+
+# Apply changes
+bazelbump recipe run autoload-migration
+
+# Run against specific directory
+bazelbump recipe run autoload-migration --path ~/myproject
+
+# Run a custom recipe file
+bazelbump recipe run ./my-recipe.star --dry-run
+
+# Run only one step
+bazelbump recipe run autoload-migration --step detect-native-rules
+```
+
+### JSON Output
+
+```json
+{
+  "recipe": "autoload-migration",
+  "success": true,
+  "steps_run": 4,
+  "step_results": [
+    {
+      "step_id": "detect-native-rules",
+      "step_name": "Detect native rule usage",
+      "success": true,
+      "description": "Found 12 matches in 5 files"
+    }
+  ],
+  "changes": [
+    {
+      "path": "MODULE.bazel",
+      "description": "Add bazel_dep for rules_cc"
+    }
+  ]
+}
+```
+
+See [Recipes](recipes.md) for detailed documentation.
 
 ---
 

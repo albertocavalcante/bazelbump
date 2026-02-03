@@ -909,24 +909,35 @@ func runRecipe(args []string) error {
 func printRecipeUsage() {
 	fmt.Fprintf(os.Stderr, `Run migration recipes.
 
+Recipes are multi-step Starlark scripts that automate complex migrations
+such as adding load() statements for native rules or updating MODULE.bazel.
+
 %s
   bazelbump recipe <subcommand> [flags]
 
 %s
-  list    List available recipes
-  show    Show recipe details
-  run     Run a recipe
+  list    List available recipes (built-in and discovered)
+  show    Show recipe details including steps
+  run     Run a recipe against your project
 
 %s
   bazelbump recipe list
   bazelbump recipe show autoload-migration
   bazelbump recipe run autoload-migration --dry-run
-  bazelbump recipe run autoload-migration --step detect-native-rules
+  bazelbump recipe run ./custom-recipe.star --dry-run
+
+%s
+  .bazelbump/recipes/*.star    Project recipes (highest priority)
+  recipes/*.star               Project recipes (alternate location)
+  ~/.config/bazelbump/recipes  User recipes
+  (built-in)                   Embedded in bazelbump
 
 Use "bazelbump recipe <subcommand> --help" for more information.
+See "bazelbump help recipes" or docs/user/recipes.md for full documentation.
 `, color(colorBold, "Usage:"),
 		color(colorBold, "Subcommands:"),
-		color(colorBold, "Examples:"))
+		color(colorBold, "Examples:"),
+		color(colorBold, "Recipe Discovery:"))
 }
 
 func runRecipeList(args []string) error {
@@ -934,33 +945,168 @@ func runRecipeList(args []string) error {
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `List available recipes.
 
+Shows all recipes from built-in sources and discovered locations.
+Recipes are discovered from project directories and user config.
+
 %s
   bazelbump recipe list [flags]
 
 %s
   --json   Output results as JSON
+  --path   Path to project directory (default: current directory)
   --help   Show this help
+
+%s
+  bazelbump recipe list
+  bazelbump recipe list --json
+  bazelbump recipe list --path ~/myproject
 `, color(colorBold, "Usage:"),
-			color(colorBold, "Flags:"))
+			color(colorBold, "Flags:"),
+			color(colorBold, "Examples:"))
 	}
 
 	jsonOutput := fs.Bool("json", false, "Output results as JSON")
+	projectPath := fs.String("path", ".", "Path to project directory")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
+	// Get built-in recipes
 	engine := recipe.NewEngine()
-	recipes := engine.List()
+	builtinRecipes := engine.List()
 
-	if *jsonOutput {
-		return outputRecipeListJSON(recipes)
+	// Discover Starlark recipes
+	discoveredRecipes, err := recipestar.DiscoverRecipes(*projectPath)
+	if err != nil {
+		// Log warning but continue with built-in recipes
+		if os.Getenv("BAZELBUMP_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "warning: recipe discovery failed: %v\n", err)
+		}
 	}
 
-	outputRecipeListText(recipes)
+	// Combine all recipes into unified list
+	allRecipes := combineRecipeLists(builtinRecipes, discoveredRecipes)
+
+	if *jsonOutput {
+		return outputCombinedRecipeListJSON(allRecipes)
+	}
+
+	outputCombinedRecipeListText(allRecipes, *projectPath)
 	return nil
 }
 
+// combinedRecipe represents a recipe from any source for unified listing.
+type combinedRecipe struct {
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Description string `json:"description"`
+	Source      string `json:"source"` // "builtin", "project", "user"
+	Path        string `json:"path,omitempty"`
+}
+
+// combineRecipeLists merges built-in and discovered recipes.
+func combineRecipeLists(builtin []recipe.RecipeSummary, discovered []recipestar.DiscoveredRecipe) []combinedRecipe {
+	seen := make(map[string]bool)
+	var result []combinedRecipe
+
+	// Add discovered recipes first (they have priority for same names)
+	for _, r := range discovered {
+		if !seen[r.Name] {
+			seen[r.Name] = true
+			result = append(result, combinedRecipe{
+				Name:        r.Name,
+				Version:     r.Version,
+				Description: r.Description,
+				Source:      r.Source,
+				Path:        r.Path,
+			})
+		}
+	}
+
+	// Add built-in recipes
+	for _, r := range builtin {
+		if !seen[r.Name] {
+			seen[r.Name] = true
+			result = append(result, combinedRecipe{
+				Name:        r.Name,
+				Version:     r.Version,
+				Description: r.Description,
+				Source:      "builtin",
+			})
+		}
+	}
+
+	return result
+}
+
+func outputCombinedRecipeListJSON(recipes []combinedRecipe) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(recipes)
+}
+
+func outputCombinedRecipeListText(recipes []combinedRecipe, projectPath string) {
+	if len(recipes) == 0 {
+		fmt.Println("No recipes available.")
+		fmt.Println("\nRecipe search paths:")
+		for _, p := range recipestar.GetDiscoveryPaths(projectPath) {
+			fmt.Printf("  - %s\n", p)
+		}
+		return
+	}
+
+	fmt.Printf("%s Available recipes:\n\n", color(colorBlue, "==>"))
+
+	// Calculate column widths
+	maxNameLen := 4   // "NAME"
+	maxSourceLen := 6 // "SOURCE"
+	for _, r := range recipes {
+		if len(r.Name) > maxNameLen {
+			maxNameLen = len(r.Name)
+		}
+		if len(r.Source) > maxSourceLen {
+			maxSourceLen = len(r.Source)
+		}
+	}
+
+	// Print header
+	fmt.Printf("  %-*s  %-*s  %-8s  %s\n", maxNameLen, "NAME", maxSourceLen, "SOURCE", "VERSION", "DESCRIPTION")
+	fmt.Printf("  %s  %s  %s  %s\n", strings.Repeat("-", maxNameLen), strings.Repeat("-", maxSourceLen), "--------", "-----------")
+
+	// Print recipes
+	for _, r := range recipes {
+		desc := r.Description
+		if len(desc) > 45 {
+			desc = desc[:42] + "..."
+		}
+
+		sourceColor := colorReset
+		switch r.Source {
+		case "builtin":
+			sourceColor = colorCyan
+		case "project":
+			sourceColor = colorGreen
+		case "user":
+			sourceColor = colorYellow
+		}
+
+		fmt.Printf("  %-*s  %s%-*s%s  %-8s  %s\n",
+			maxNameLen, r.Name,
+			sourceColor, maxSourceLen, r.Source, colorReset,
+			r.Version, desc)
+	}
+
+	fmt.Printf("\nTotal: %d recipe(s)\n", len(recipes))
+
+	// Show search paths
+	fmt.Printf("\n%s\n", color(colorBold, "Recipe search paths:"))
+	for _, p := range recipestar.GetDiscoveryPaths(projectPath) {
+		fmt.Printf("  - %s\n", p)
+	}
+}
+
+// Keep original functions for backward compatibility
 func outputRecipeListJSON(recipes []recipe.RecipeSummary) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -1005,20 +1151,25 @@ func runRecipeShow(args []string) error {
 		fmt.Fprintf(os.Stderr, `Show recipe details.
 
 %s
-  bazelbump recipe show <name> [flags]
+  bazelbump recipe show [flags] <name>
+  bazelbump recipe show [flags] ./path/to/recipe.star
 
 %s
   --json   Output results as JSON
+  --path   Path to project directory (default: current directory)
   --help   Show this help
 
 %s
   bazelbump recipe show autoload-migration
+  bazelbump recipe show --path /path/to/project my-recipe
+  bazelbump recipe show ./recipes/custom.star
 `, color(colorBold, "Usage:"),
 			color(colorBold, "Flags:"),
 			color(colorBold, "Examples:"))
 	}
 
 	jsonOutput := fs.Bool("json", false, "Output results as JSON")
+	projectPath := fs.String("path", ".", "Path to project directory")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1031,10 +1182,19 @@ func runRecipeShow(args []string) error {
 
 	name := fs.Arg(0)
 
+	// First try to find as a discovered/starlark recipe
+	discovered, err := recipestar.ResolveRecipe(name, *projectPath)
+	if err == nil {
+		// Found a Starlark recipe, show its details
+		return showStarlarkRecipe(discovered, *jsonOutput)
+	}
+
+	// Fall back to built-in recipes
 	engine := recipe.NewEngine()
 	r, ok := engine.Get(name)
 	if !ok {
-		return fmt.Errorf("unknown recipe: %s", name)
+		// Recipe not found anywhere
+		return fmt.Errorf("unknown recipe: %s\n\nUse 'bazelbump recipe list' to see available recipes", name)
 	}
 
 	if *jsonOutput {
@@ -1043,6 +1203,160 @@ func runRecipeShow(args []string) error {
 
 	outputRecipeShowText(r)
 	return nil
+}
+
+// showStarlarkRecipe displays details of a discovered Starlark recipe.
+func showStarlarkRecipe(discovered *recipestar.DiscoveredRecipe, jsonOutput bool) error {
+	// Parse the recipe to get full details
+	executor := recipestar.NewExecutor(".", recipestar.Options{})
+	starlarkRecipe, err := executor.Interpret(discovered.Path)
+	if err != nil {
+		// Fall back to basic info from discovery
+		if jsonOutput {
+			return outputDiscoveredRecipeJSON(discovered)
+		}
+		outputDiscoveredRecipeText(discovered)
+		return nil
+	}
+
+	if jsonOutput {
+		return outputStarlarkRecipeJSON(starlarkRecipe, discovered)
+	}
+
+	outputStarlarkRecipeText(starlarkRecipe, discovered)
+	return nil
+}
+
+// outputDiscoveredRecipeJSON outputs basic discovered recipe info as JSON.
+func outputDiscoveredRecipeJSON(r *recipestar.DiscoveredRecipe) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(r)
+}
+
+// outputDiscoveredRecipeText outputs basic discovered recipe info as text.
+func outputDiscoveredRecipeText(r *recipestar.DiscoveredRecipe) {
+	fmt.Printf("%s Recipe: %s\n\n", color(colorBlue, "==>"), color(colorBold, r.Name))
+	fmt.Printf("  Source:      %s\n", r.Source)
+	fmt.Printf("  Path:        %s\n", r.Path)
+	if r.Version != "" {
+		fmt.Printf("  Version:     %s\n", r.Version)
+	}
+	if r.Description != "" {
+		fmt.Printf("  Description: %s\n", r.Description)
+	}
+	fmt.Printf("\n  (Run 'bazelbump recipe run %s --dry-run' to preview)\n", r.Name)
+}
+
+// starlarkRecipeOutput is used for JSON serialization of Starlark recipes.
+type starlarkRecipeOutput struct {
+	Name            string                        `json:"name"`
+	Version         string                        `json:"version"`
+	Description     string                        `json:"description"`
+	Source          string                        `json:"source"`
+	Path            string                        `json:"path"`
+	MinBazelVersion string                        `json:"min_bazel_version,omitempty"`
+	MaxBazelVersion string                        `json:"max_bazel_version,omitempty"`
+	Steps           []starlarkStepOutput          `json:"steps"`
+}
+
+type starlarkStepOutput struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Type        string   `json:"type"`
+	Description string   `json:"description,omitempty"`
+	DependsOn   []string `json:"depends_on,omitempty"`
+}
+
+// outputStarlarkRecipeJSON outputs a fully parsed Starlark recipe as JSON.
+func outputStarlarkRecipeJSON(r *recipestar.Recipe, discovered *recipestar.DiscoveredRecipe) error {
+	output := starlarkRecipeOutput{
+		Name:            r.Name,
+		Version:         r.Version,
+		Description:     r.Description,
+		Source:          discovered.Source,
+		Path:            discovered.Path,
+		MinBazelVersion: r.MinBazelVersion,
+		MaxBazelVersion: r.MaxBazelVersion,
+	}
+
+	for _, step := range r.Steps {
+		stepType := "unknown"
+		switch step.(type) {
+		case *recipestar.ScanStep:
+			stepType = "scan"
+		case *recipestar.EditStep:
+			stepType = "edit"
+		case *recipestar.VerifyStep:
+			stepType = "verify"
+		}
+
+		output.Steps = append(output.Steps, starlarkStepOutput{
+			ID:          step.GetID(),
+			Name:        step.GetName(),
+			Type:        stepType,
+			Description: step.GetDescription(),
+			DependsOn:   step.GetDependsOn(),
+		})
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(output)
+}
+
+// outputStarlarkRecipeText outputs a fully parsed Starlark recipe as text.
+func outputStarlarkRecipeText(r *recipestar.Recipe, discovered *recipestar.DiscoveredRecipe) {
+	fmt.Printf("%s Recipe: %s\n\n", color(colorBlue, "==>"), color(colorBold, r.Name))
+
+	// Show source info
+	sourceColor := colorReset
+	switch discovered.Source {
+	case "project":
+		sourceColor = colorGreen
+	case "user":
+		sourceColor = colorYellow
+	case "explicit":
+		sourceColor = colorCyan
+	}
+	fmt.Printf("  Source:      %s%s%s\n", sourceColor, discovered.Source, colorReset)
+	fmt.Printf("  Path:        %s\n", discovered.Path)
+	fmt.Printf("  Version:     %s\n", r.Version)
+	fmt.Printf("  Description: %s\n", r.Description)
+
+	if r.MinBazelVersion != "" || r.MaxBazelVersion != "" {
+		fmt.Printf("  Bazel:       ")
+		if r.MinBazelVersion != "" && r.MaxBazelVersion != "" {
+			fmt.Printf("%s - %s\n", r.MinBazelVersion, r.MaxBazelVersion)
+		} else if r.MinBazelVersion != "" {
+			fmt.Printf(">= %s\n", r.MinBazelVersion)
+		} else {
+			fmt.Printf("<= %s\n", r.MaxBazelVersion)
+		}
+	}
+
+	fmt.Printf("\n%s (%d total)\n", color(colorBold, "Steps:"), len(r.Steps))
+
+	for i, step := range r.Steps {
+		stepType := "unknown"
+		switch step.(type) {
+		case *recipestar.ScanStep:
+			stepType = "scan"
+		case *recipestar.EditStep:
+			stepType = "edit"
+		case *recipestar.VerifyStep:
+			stepType = "verify"
+		}
+
+		fmt.Printf("\n  %d. %s (%s)\n", i+1, color(colorCyan, step.GetName()), stepType)
+		fmt.Printf("     ID: %s\n", step.GetID())
+		if step.GetDescription() != "" {
+			fmt.Printf("     %s\n", step.GetDescription())
+		}
+		if len(step.GetDependsOn()) > 0 {
+			fmt.Printf("     Depends on: %s\n", strings.Join(step.GetDependsOn(), ", "))
+		}
+	}
 }
 
 func outputRecipeShowJSON(r *recipe.Recipe) error {
@@ -1100,11 +1414,15 @@ func runRecipeRun(args []string) error {
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Run a recipe.
 
-%s
-  bazelbump recipe run <name> [flags]
+Executes a recipe against your project, making the changes defined in the
+recipe's steps. Always run with --dry-run first to preview changes.
 
 %s
-  --dry-run    Show what would change without applying
+  bazelbump recipe run [flags] <name>
+  bazelbump recipe run [flags] ./path/to/recipe.star
+
+%s
+  --dry-run    Show what would change without applying (recommended first)
   --path       Path to project directory (default: current directory)
   --step       Run only a specific step (by ID)
   --verbose    Show verbose output
@@ -1112,13 +1430,30 @@ func runRecipeRun(args []string) error {
   --help       Show this help
 
 %s
+  # Preview changes (always do this first)
+  bazelbump recipe run --dry-run autoload-migration
+
+  # Apply changes
   bazelbump recipe run autoload-migration
-  bazelbump recipe run autoload-migration --dry-run
-  bazelbump recipe run autoload-migration --path /path/to/project
-  bazelbump recipe run autoload-migration --step detect-native-rules
+
+  # Run against a specific project
+  bazelbump recipe run --path /path/to/project autoload-migration
+
+  # Run a custom recipe file
+  bazelbump recipe run --dry-run ./my-recipe.star
+
+  # Run only the detection step
+  bazelbump recipe run --step detect-native-rules autoload-migration
+
+%s
+  If a step fails, the recipe's on_failure mode determines behavior:
+  - rollback: Revert all changes and stop (default)
+  - stop:     Stop but keep changes made so far
+  - continue: Log error and continue with next step
 `, color(colorBold, "Usage:"),
 			color(colorBold, "Flags:"),
-			color(colorBold, "Examples:"))
+			color(colorBold, "Examples:"),
+			color(colorBold, "Failure Handling:"))
 	}
 
 	dryRun := fs.Bool("dry-run", false, "Show what would change without applying")
@@ -1138,27 +1473,21 @@ func runRecipeRun(args []string) error {
 
 	name := fs.Arg(0)
 
-	// Check if this is a .star file (Starlark recipe)
-	if strings.HasSuffix(name, ".star") || strings.Contains(name, "/") || strings.Contains(name, string(os.PathSeparator)) {
-		return runStarlarkRecipe(name, *projectPath, *dryRun, *stepID, *verbose, *jsonOutput)
+	// Try to resolve as a discovered Starlark recipe first
+	discovered, resolveErr := recipestar.ResolveRecipe(name, *projectPath)
+	if resolveErr == nil {
+		// Found a Starlark recipe - run it
+		return runStarlarkRecipe(discovered.Path, *projectPath, *dryRun, *stepID, *verbose, *jsonOutput)
 	}
 
 	// Fall back to built-in Go recipes
 	engine := recipe.NewEngine()
 
-	// Verify recipe exists
+	// Verify recipe exists in built-in recipes
 	if _, ok := engine.Get(name); !ok {
-		// Try to find a .star file with this name
-		starPath := name + ".star"
-		if _, err := os.Stat(starPath); err == nil {
-			return runStarlarkRecipe(starPath, *projectPath, *dryRun, *stepID, *verbose, *jsonOutput)
-		}
-		// Check in examples/recipes
-		examplesPath := filepath.Join("examples", "recipes", name+".star")
-		if _, err := os.Stat(examplesPath); err == nil {
-			return runStarlarkRecipe(examplesPath, *projectPath, *dryRun, *stepID, *verbose, *jsonOutput)
-		}
-		return fmt.Errorf("unknown recipe: %s (not a built-in recipe or .star file)", name)
+		// Neither discovered nor built-in
+		return fmt.Errorf("unknown recipe: %s\n\nUse 'bazelbump recipe list' to see available recipes\n\nRecipe search paths:\n%s",
+			name, formatSearchPaths(*projectPath))
 	}
 
 	opts := recipe.Options{
@@ -1183,6 +1512,18 @@ func runRecipeRun(args []string) error {
 		os.Exit(1)
 	}
 	return nil
+}
+
+// formatSearchPaths formats the recipe search paths for error messages.
+func formatSearchPaths(projectPath string) string {
+	paths := recipestar.GetDiscoveryPaths(projectPath)
+	var sb strings.Builder
+	for _, p := range paths {
+		sb.WriteString("  - ")
+		sb.WriteString(p)
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 // runStarlarkRecipe runs a Starlark .star recipe file.
