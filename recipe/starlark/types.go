@@ -361,6 +361,57 @@ type DeleteFileOp struct {
 	Path string
 }
 
+// RunCommandOp executes a shell command.
+// Use this for running external tools like formatters, linters, etc.
+type RunCommandOp struct {
+	baseOperation
+
+	// Command is the shell command to execute.
+	Command string
+
+	// Description is a human-readable description of what the command does.
+	Description string
+
+	// Timeout is the command timeout (e.g., "5m", "30s").
+	// Default is "5m" if not specified.
+	Timeout string
+
+	// AllowFailure indicates whether to continue if the command fails.
+	AllowFailure bool
+
+	// Echo prints the command before executing (like set -x).
+	// Useful for debugging and understanding what's being run.
+	Echo bool
+
+	// Capture stores stdout/stderr in ctx.outputs for later steps.
+	// The output is stored as {"stdout": "...", "stderr": "...", "exit_code": N}
+	Capture bool
+
+	// Env is a map of environment variables to set for the command.
+	Env map[string]string
+
+	// WorkingDir overrides the working directory for this command.
+	// Relative paths are resolved from the project root.
+	WorkingDir string
+
+	// Shell specifies which shell to use (default: "sh").
+	// Options: "sh", "bash"
+	Shell string
+
+	// StepID is set during execution to track which step this belongs to.
+	// Used for storing captured output.
+	StepID string
+}
+
+// CommandResult holds the result of a run_command execution.
+// This is stored in ctx.outputs when capture=True.
+type CommandResult struct {
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exit_code"`
+	Command  string `json:"command"`
+}
+
 // ScanResult holds the results of a scan step.
 // During interpretation, this is a "future reference" - a placeholder
 // that will be resolved during execution.

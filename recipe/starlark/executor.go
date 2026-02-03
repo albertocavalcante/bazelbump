@@ -27,12 +27,16 @@ package starlark
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
@@ -335,6 +339,16 @@ func (e *Executor) validateOperation(opPrefix string, op Operation) []string {
 	case *DeleteFileOp:
 		if o.Path == "" {
 			errors = append(errors, fmt.Sprintf("%s: delete_file requires path", opPrefix))
+		}
+
+	case *RunCommandOp:
+		if o.Command == "" {
+			errors = append(errors, fmt.Sprintf("%s: run_command requires command", opPrefix))
+		}
+		if o.Timeout != "" {
+			if _, err := time.ParseDuration(o.Timeout); err != nil {
+				errors = append(errors, fmt.Sprintf("%s: run_command has invalid timeout %q: %v", opPrefix, o.Timeout, err))
+			}
 		}
 
 	case *EnsureLoadForDetectedOp:
@@ -840,6 +854,8 @@ func (e *Executor) executeOperation(ctx *Context, op Operation) ([]*FileChange, 
 		return e.opCopyFile(ctx, o)
 	case *DeleteFileOp:
 		return e.opDeleteFile(ctx, o)
+	case *RunCommandOp:
+		return e.opRunCommand(ctx, o)
 	default:
 		return nil, fmt.Errorf("unknown operation type: %s", op.GetType())
 	}
@@ -1641,6 +1657,196 @@ func (e *Executor) opDeleteFile(ctx *Context, op *DeleteFileOp) ([]*FileChange, 
 	}
 
 	return changes, nil
+}
+
+// opRunCommand executes a shell command.
+func (e *Executor) opRunCommand(ctx *Context, op *RunCommandOp) ([]*FileChange, error) {
+	// Parse timeout
+	timeout := 5 * time.Minute
+	if op.Timeout != "" {
+		var err error
+		timeout, err = time.ParseDuration(op.Timeout)
+		if err != nil {
+			return nil, fmt.Errorf("invalid timeout %q: %w", op.Timeout, err)
+		}
+	}
+
+	// Determine shell
+	shell := op.Shell
+	if shell == "" {
+		shell = "sh"
+	}
+	shellArgs := []string{"-c", op.Command}
+	if shell == "bash" {
+		shellArgs = []string{"-c", op.Command}
+	}
+
+	// Determine working directory
+	workDir := ctx.ProjectPath
+	if op.WorkingDir != "" {
+		if filepath.IsAbs(op.WorkingDir) {
+			workDir = op.WorkingDir
+		} else {
+			workDir = filepath.Join(ctx.ProjectPath, op.WorkingDir)
+		}
+	}
+
+	// Echo mode: print command before executing (like set -x)
+	if op.Echo {
+		desc := op.Description
+		if desc == "" {
+			desc = "run_command"
+		}
+		fmt.Printf("+ [%s] %s\n", desc, formatCommandForDisplay(op.Command))
+		if op.WorkingDir != "" {
+			fmt.Printf("  (in %s)\n", workDir)
+		}
+		if len(op.Env) > 0 {
+			fmt.Printf("  (env: %v)\n", op.Env)
+		}
+	}
+
+	// In dry-run mode, just show what would be executed
+	if ctx.DryRun {
+		desc := op.Description
+		if desc == "" {
+			desc = "Execute shell command"
+		}
+		// Return a pseudo-change showing the command
+		change := &FileChange{
+			Path:        "(command)",
+			Description: fmt.Sprintf("%s: %s", desc, truncateCommand(op.Command, 100)),
+		}
+
+		// If capture is enabled, store a mock result
+		if op.Capture && op.StepID != "" {
+			ctx.Outputs[op.StepID] = &CommandResult{
+				Command:  op.Command,
+				Stdout:   "(dry-run: output not captured)",
+				Stderr:   "",
+				ExitCode: 0,
+			}
+		}
+
+		return []*FileChange{change}, nil
+	}
+
+	// Execute the command
+	cmdCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, shell, shellArgs...)
+	cmd.Dir = workDir
+
+	// Set environment variables
+	if len(op.Env) > 0 {
+		cmd.Env = os.Environ() // Start with current env
+		for k, v := range op.Env {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
+
+	// Capture stdout and stderr separately if requested
+	var stdout, stderr bytes.Buffer
+	if op.Capture {
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+	} else {
+		// Stream directly to console
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 1
+		}
+	}
+
+	// Store captured output
+	if op.Capture && op.StepID != "" {
+		result := &CommandResult{
+			Command:  op.Command,
+			Stdout:   stdout.String(),
+			Stderr:   stderr.String(),
+			ExitCode: exitCode,
+		}
+		ctx.Outputs[op.StepID] = result
+
+		// Also print if echo is enabled
+		if op.Echo {
+			if stdout.Len() > 0 {
+				fmt.Printf("%s", stdout.String())
+			}
+			if stderr.Len() > 0 {
+				fmt.Fprintf(os.Stderr, "%s", stderr.String())
+			}
+		}
+	}
+
+	// Handle errors
+	if err != nil {
+		if op.AllowFailure {
+			// Log but don't fail
+			if op.Echo {
+				fmt.Printf("+ Command exited with code %d (allowed)\n", exitCode)
+			}
+			return nil, nil
+		}
+		errMsg := fmt.Sprintf("command failed with exit code %d", exitCode)
+		if op.Capture {
+			errMsg += fmt.Sprintf("\nStdout: %s\nStderr: %s", stdout.String(), stderr.String())
+		}
+		return nil, fmt.Errorf("%s: %w", errMsg, err)
+	}
+
+	if op.Echo {
+		fmt.Printf("+ Command completed successfully\n")
+	}
+
+	return nil, nil
+}
+
+// truncateCommand shortens a command for display
+func truncateCommand(cmd string, maxLen int) string {
+	// Replace newlines with spaces for single-line display
+	cmd = strings.ReplaceAll(cmd, "\n", " ")
+	cmd = strings.Join(strings.Fields(cmd), " ") // Collapse whitespace
+
+	if len(cmd) <= maxLen {
+		return cmd
+	}
+	return cmd[:maxLen-3] + "..."
+}
+
+// formatCommandForDisplay formats a command for echo output.
+// Shows the command in a readable multi-line format if it contains && or ;
+func formatCommandForDisplay(cmd string) string {
+	// If command is short, show it as-is
+	if len(cmd) < 80 && !strings.Contains(cmd, "\n") {
+		return cmd
+	}
+
+	// For long commands, show first line or truncated version
+	lines := strings.Split(cmd, "\n")
+	if len(lines) > 1 {
+		// Multi-line command: show first line with indicator
+		firstLine := strings.TrimSpace(lines[0])
+		if len(firstLine) > 60 {
+			firstLine = firstLine[:57] + "..."
+		}
+		return firstLine + " (...)"
+	}
+
+	// Single long line: truncate
+	if len(cmd) > 80 {
+		return cmd[:77] + "..."
+	}
+	return cmd
 }
 
 // executeVerify runs a verification command.

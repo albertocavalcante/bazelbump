@@ -1,7 +1,7 @@
 # bazelbump Handoff
 
 **Date:** 2026-02-03
-**Status:** Core complete, Starlark recipe system functional, ready for Phase 1 enhancements
+**Status:** Phase 1 complete, entering Phase 2 (production readiness)
 
 ## What's Built
 
@@ -38,7 +38,7 @@
 | Three-phase execution | ✅ Complete | Interpret → Validate → Execute |
 | Recipe discovery | ✅ Complete | Project, user, builtin sources |
 | Standard library | ✅ Complete | `@stdlib//` with rule patterns |
-| Operations | ✅ Complete | ensure_load, remove_flag, ensure_bazel_dep, etc. |
+| Operations | ✅ Complete | ensure_load, remove_flag, ensure_bazel_dep, run_command, etc. |
 | Load system | ✅ Complete | Relative, absolute, stdlib imports |
 
 ### Tooling
@@ -67,20 +67,22 @@
 
 **See [ROADMAP.md](docs/ROADMAP.md) for the full development plan.**
 
-### Phase 1: 100% Starlark Authoring (Current Focus)
+### Phase 1: 100% Starlark Authoring ✅ COMPLETE
 
-Enable users to write fully custom recipes:
+Users can now write fully custom recipes:
 
-1. **File I/O Builtins** - `read_file()`, `glob()`, `list_dir()`, `file_exists()`
-2. **Regex Module** - Embed starlib's `re` module
-3. **BUILD File Parsing** - Structured access to rules and loads
-4. **Custom Functions** - User-defined scanners and transforms
+- **File I/O Builtins** - `read_file()`, `glob()`, `list_dir()`, `file_exists()`
+- **Regex Module** - starlib's `re` module embedded
+- **BUILD File Parsing** - `parse_build_file()` for structured access
+- **Custom Functions** - User-defined scanners and transforms with `impl=` and `operations=`
+- **run_command** - Execute shell commands (formatters, linters, external tools)
+- **Authoring UX** - `recipe validate`, `recipe builtins`, `recipe init`
 
-### Phase 2: Production Readiness
+### Phase 2: Production Readiness (Current Focus)
 
 - Real-world testing on OSS projects
 - Built-in recipes (autoload, bzlmod migration)
-- Buildifier integration
+- **Formatter recipes added**: `format-buildifier.star`, `format-skyfmt.star`, `format-compare.star`
 - Snapshot & rollback
 
 ### Phase 3: Ecosystem Integration

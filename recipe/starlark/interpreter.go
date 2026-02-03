@@ -135,6 +135,7 @@ func (i *Interpreter) makeBuiltins() starlark.StringDict {
 		"replace_text": starlark.NewBuiltin("replace_text", i.builtinReplaceText),
 		"copy_file":    starlark.NewBuiltin("copy_file", i.builtinCopyFile),
 		"delete_file":  starlark.NewBuiltin("delete_file", i.builtinDeleteFile),
+		"run_command":  starlark.NewBuiltin("run_command", i.builtinRunCommand),
 
 		// Error handling functions
 		"fail": starlark.NewBuiltin("fail", i.builtinFail),
@@ -1000,6 +1001,77 @@ func (i *Interpreter) builtinDeleteFile(thread *starlark.Thread, fn *starlark.Bu
 	op := &DeleteFileOp{
 		baseOperation: baseOperation{Type: "delete_file"},
 		Path:          path,
+	}
+
+	return operationValue{op: op}, nil
+}
+
+// builtinRunCommand implements the run_command() builtin for executing shell commands.
+func (i *Interpreter) builtinRunCommand(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	var (
+		command      string
+		description  string
+		timeout      string
+		allowFailure bool
+		echo         bool
+		capture      bool
+		envDict      *starlark.Dict
+		workingDir   string
+		shell        string
+	)
+
+	if err := starlark.UnpackArgs("run_command", args, kwargs,
+		"command", &command,
+		"description?", &description,
+		"timeout?", &timeout,
+		"allow_failure?", &allowFailure,
+		"echo?", &echo,
+		"capture?", &capture,
+		"env?", &envDict,
+		"working_dir?", &workingDir,
+		"shell?", &shell,
+	); err != nil {
+		return nil, err
+	}
+
+	// Default timeout
+	if timeout == "" {
+		timeout = "5m"
+	}
+
+	// Default shell
+	if shell == "" {
+		shell = "sh"
+	}
+
+	// Convert env dict to map
+	var env map[string]string
+	if envDict != nil {
+		env = make(map[string]string)
+		for _, item := range envDict.Items() {
+			key, ok := starlark.AsString(item[0])
+			if !ok {
+				return nil, fmt.Errorf("env key must be string, got %s", item[0].Type())
+			}
+			val, ok := starlark.AsString(item[1])
+			if !ok {
+				return nil, fmt.Errorf("env value must be string, got %s", item[1].Type())
+			}
+			env[key] = val
+		}
+	}
+
+	op := &RunCommandOp{
+		baseOperation: baseOperation{Type: "run_command"},
+		Command:       command,
+		Description:   description,
+		Timeout:       timeout,
+		AllowFailure:  allowFailure,
+		Echo:          echo,
+		Capture:       capture,
+		Env:           env,
+		WorkingDir:    workingDir,
+		Shell:         shell,
 	}
 
 	return operationValue{op: op}, nil

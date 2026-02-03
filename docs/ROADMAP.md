@@ -144,22 +144,24 @@ Ship recipes for common migrations:
 - [ ] `flag-cleanup` - Remove all deprecated flags for target version
 - [ ] `incompatible-flags` - Set incompatible flags explicitly
 
-### 2.3 Buildifier Integration
+### 2.3 Formatter Integration
 
-Preserve code style after edits:
+Format code with buildifier or skyfmt:
 
 ```starlark
-recipe(
-    name = "my-migration",
-    post_edit = "buildifier",  # Auto-format after edits
-    steps = [...],
+# Using run_command for formatting
+run_command(
+    command = "buildifier -mode=fix .",
+    description = "Format all Starlark files",
 )
 ```
 
 **Implementation:**
-- [ ] Detect buildifier in PATH
-- [ ] Run buildifier on modified BUILD files
-- [ ] Option to skip formatting
+- [x] `run_command` operation for shell commands
+- [x] Example recipes: `format-buildifier.star`, `format-skyfmt.star`
+- [x] A/B testing recipe: `format-compare.star`
+- [ ] Detect formatter in PATH
+- [ ] Auto-format option in recipe config
 
 ### 2.4 Snapshot & Rollback
 
@@ -348,8 +350,8 @@ Want to help? Here's how:
 
 | Phase | Target | Status |
 |-------|--------|--------|
-| Phase 1 | Q1 2026 | 🔄 In Progress |
-| Phase 2 | Q2 2026 | 📋 Planned |
+| Phase 1 | Q1 2026 | ✅ Complete |
+| Phase 2 | Q2 2026 | 🔄 In Progress |
 | Phase 3 | Q3 2026 | 📋 Planned |
 | Phase 4 | Q4 2026 | 💭 Future |
 

@@ -73,6 +73,7 @@ func AllBuiltinDocs() []BuiltinDoc {
 		docReplaceText(),
 		docCopyFile(),
 		docDeleteFile(),
+		docRunCommand(),
 
 		// File I/O
 		docReadFile(),
@@ -532,6 +533,61 @@ func docDeleteFile() BuiltinDoc {
 		Example: `delete_file("deprecated/BUILD")
 delete_file("**/*.bak")`,
 		SeeAlso: []string{"copy_file", "replace_text"},
+	}
+}
+
+func docRunCommand() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "run_command",
+		Category:    "operation",
+		Signature:   "run_command(command, description=None, timeout=\"5m\", allow_failure=False, echo=False, capture=False, env=None, working_dir=None, shell=\"sh\")",
+		Description: "Execute a shell command with optional echo, capture, and environment",
+		Args: []ArgDoc{
+			{Name: "command", Type: "str", Required: true, Description: "Shell command to execute"},
+			{Name: "description", Type: "str", Required: false, Description: "Human-readable description"},
+			{Name: "timeout", Type: "str", Required: false, Description: "Command timeout (default: \"5m\")"},
+			{Name: "allow_failure", Type: "bool", Required: false, Description: "Continue on failure (default: False)"},
+			{Name: "echo", Type: "bool", Required: false, Description: "Print command before executing (like set -x)"},
+			{Name: "capture", Type: "bool", Required: false, Description: "Store stdout/stderr in ctx.outputs for later steps"},
+			{Name: "env", Type: "dict", Required: false, Description: "Environment variables to set"},
+			{Name: "working_dir", Type: "str", Required: false, Description: "Working directory (relative to project)"},
+			{Name: "shell", Type: "str", Required: false, Description: "Shell to use: \"sh\" (default) or \"bash\""},
+		},
+		Behavior: []string{
+			"Executes command via the specified shell",
+			"echo=True prints command before execution (like set -x)",
+			"capture=True stores {stdout, stderr, exit_code} in ctx.outputs",
+			"In dry-run mode, shows what would be executed",
+			"Environment variables merge with existing environment",
+		},
+		Example: `# Simple command with echo (set -x style)
+run_command(
+    command = "buildifier -mode=fix .",
+    echo = True,
+)
+
+# Capture output for later use
+run_command(
+    command = "git rev-parse HEAD",
+    capture = True,
+    echo = True,
+)
+# Later: ctx.outputs["step-id"]["stdout"]
+
+# With environment and working directory
+run_command(
+    command = "npm install",
+    working_dir = "frontend/",
+    env = {"NODE_ENV": "production"},
+    echo = True,
+)
+
+# Use bash for advanced features
+run_command(
+    command = "for f in *.txt; do echo $f; done",
+    shell = "bash",
+)`,
+		SeeAlso: []string{"verify", "replace_text"},
 	}
 }
 
