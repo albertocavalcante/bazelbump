@@ -208,6 +208,195 @@ generate: sync-deps
 
 ---
 
+## Transformation Philosophy
+
+### Inspiration: Modern Code Transformation Tools
+
+bazelbump draws inspiration from tools that perform reliable, large-scale code transformations:
+
+| Tool | Approach | Key Insight |
+|------|----------|-------------|
+| [**Sourcegraph Batch Changes**](https://docs.sourcegraph.com/batch_changes) | Structural search + comby | Scale transformations across thousands of repos |
+| [**OpenRewrite**](https://docs.openrewrite.org/) | Recipe-based CST transforms | Preserve formatting via Lossless Semantic Trees (LST) |
+| [**Comby**](https://comby.dev/) | Structural pattern matching | Language-agnostic, whitespace-preserving |
+| [**IntelliJ Platform**](https://plugins.jetbrains.com/docs/intellij/psi.html) | PSI (Program Structure Interface) | Rich semantic understanding + intentions |
+| [**LSP Code Actions**](https://microsoft.github.io/language-server-protocol/) | textDocument/codeAction | Standardized automated fixes |
+| [**Buildifier**](https://github.com/bazelbuild/buildtools/tree/master/buildifier) | Bazel-specific AST | Load sorting, formatting, linting |
+| [**Gazelle**](https://github.com/bazelbuild/bazel-gazelle) | Heuristic BUILD generation | Infer structure from source files |
+
+### Core Principle: Deterministic First, Heuristics Second
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    TRANSFORMATION HIERARCHY                      │
+├─────────────────────────────────────────────────────────────────┤
+│  TIER 1: Deterministic (CST-based)                              │
+│  ├── Exact pattern match → exact replacement                    │
+│  ├── Preserves whitespace, comments, formatting                 │
+│  ├── Verifiable: input X always produces output Y               │
+│  └── Examples: flag rename, load() insertion, version bump      │
+├─────────────────────────────────────────────────────────────────┤
+│  TIER 2: Heuristic (Pattern-based)                              │
+│  ├── Best-effort when deterministic isn't possible              │
+│  ├── Clearly marked as suggestions, not guarantees              │
+│  ├── User confirmation required before applying                 │
+│  └── Examples: native rule detection, dependency inference      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Why this matters:**
+
+1. **Trust** — Users must trust automated changes. Deterministic transforms build confidence.
+2. **Reviewability** — Changes should be explainable: "replaced X with Y because Z"
+3. **Rollback** — If something breaks, understanding exactly what changed is critical.
+4. **CI/CD** — Deterministic transforms can run in CI without human review.
+
+### Concrete Example: `--incompatible_autoload_externally` Migration
+
+From [Bazel 9.0.0 release notes](https://github.com/bazelbuild/bazel/releases/tag/9.0.0):
+
+> The flag `--incompatible_autoload_externally` now defaults to the empty string (#23043), meaning that all language-specific rules will now need to be loaded from their respective modules (rules_cc, rules_java, etc). This marks the conclusion of the Starlarkification effort.
+
+**Before (Bazel 8.x):** Native rules auto-loaded
+
+```starlark
+# BUILD - just works
+cc_library(
+    name = "mylib",
+    srcs = ["mylib.cc"],
+)
+```
+
+**After (Bazel 9.0):** Explicit loads required
+
+```starlark
+# BUILD - must add load()
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "mylib",
+    srcs = ["mylib.cc"],
+)
+```
+
+#### Tier 1: Deterministic Transform
+
+```go
+// internal/transforms/autoload.go
+
+// NativeRuleMapping maps native rules to their new load locations.
+// Source: https://github.com/bazelbuild/bazel/issues/23043
+var NativeRuleMapping = map[string]LoadStatement{
+    "cc_library":    {Label: "@rules_cc//cc:defs.bzl", Symbols: []string{"cc_library"}},
+    "cc_binary":     {Label: "@rules_cc//cc:defs.bzl", Symbols: []string{"cc_binary"}},
+    "cc_test":       {Label: "@rules_cc//cc:defs.bzl", Symbols: []string{"cc_test"}},
+    "java_library":  {Label: "@rules_java//java:defs.bzl", Symbols: []string{"java_library"}},
+    "java_binary":   {Label: "@rules_java//java:defs.bzl", Symbols: []string{"java_binary"}},
+    "py_library":    {Label: "@rules_python//python:defs.bzl", Symbols: []string{"py_library"}},
+    "py_binary":     {Label: "@rules_python//python:defs.bzl", Symbols: []string{"py_binary"}},
+    // ... complete mapping from Bazel source
+}
+
+// TransformAutoload adds required load() statements to a BUILD file.
+func TransformAutoload(file *build.File) (*build.File, []Change) {
+    // 1. Parse BUILD file with buildtools (CST - preserves formatting)
+    // 2. Find all rule calls in the file
+    // 3. Match against NativeRuleMapping
+    // 4. Generate load() statements for missing rules
+    // 5. Use buildtools to insert loads (handles sorting, deduplication)
+    // 6. Return modified file + list of changes for reporting
+}
+```
+
+**Integration with Buildifier:**
+
+Rather than reinventing load() sorting, delegate to buildifier:
+
+```go
+// After inserting loads, run buildifier for canonical formatting
+import "github.com/bazelbuild/buildtools/build"
+
+func FormatWithBuildifier(file *build.File) *build.File {
+    // buildtools handles:
+    // - Load statement sorting (by label, then by symbol)
+    // - Deduplication of symbols
+    // - Correct positioning (loads at top, after comments)
+    return build.Format(file)
+}
+```
+
+#### Tier 2: Heuristic Assist
+
+When CST parsing isn't available or practical:
+
+```go
+// Heuristic: Quick scan for native rule usage
+// Used for: Initial project assessment, CI checks, large monorepos
+
+func QuickScanForNativeRules(content []byte) []string {
+    var detected []string
+    patterns := []string{
+        `\bcc_library\s*\(`,
+        `\bcc_binary\s*\(`,
+        `\bjava_library\s*\(`,
+        // ...
+    }
+    for _, pattern := range patterns {
+        if regexp.MustCompile(pattern).Match(content) {
+            detected = append(detected, extractRuleName(pattern))
+        }
+    }
+    return detected
+}
+```
+
+**When to use heuristics:**
+
+| Scenario | Approach | Rationale |
+|----------|----------|-----------|
+| Single BUILD file | Deterministic (CST) | Accuracy matters, fast enough |
+| 10,000 BUILD files | Heuristic scan first | Find candidates, then CST for actual changes |
+| Malformed files | Heuristic | CST parsing fails, still provide guidance |
+| Quick CI check | Heuristic | "You might need to migrate X" warning |
+
+### Transformation Pipeline
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│   ANALYZE    │ ──▶ │    PLAN      │ ──▶ │   PREVIEW    │ ──▶ │    APPLY     │
+│              │     │              │     │              │     │              │
+│ - Parse files│     │ - Match rules│     │ - Show diff  │     │ - Write files│
+│ - Detect ver │     │ - Gen changes│     │ - User review│     │ - Run buildf │
+│ - Find usage │     │ - Sort by pri│     │ - Confirm    │     │ - Verify     │
+└──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
+       │                    │                    │                    │
+       ▼                    ▼                    ▼                    ▼
+   Heuristics OK      Deterministic         Human-in-loop      Deterministic
+```
+
+### Output: Explainable Changes
+
+Every transformation must be explainable:
+
+```
+CHANGE: Add load statement to //src/lib:BUILD
+
+  Reason: cc_library requires explicit load in Bazel 9.0+
+  Reference: https://github.com/bazelbuild/bazel/issues/23043
+
+  @@ -1,3 +1,5 @@
+  +load("@rules_cc//cc:defs.bzl", "cc_library")
+  +
+   cc_library(
+       name = "mylib",
+       srcs = ["mylib.cc"],
+
+  Confidence: HIGH (deterministic CST transform)
+  Reversible: YES (remove load statement)
+```
+
+---
+
 ## CLI Interface
 
 ### Commands
