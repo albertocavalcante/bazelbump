@@ -32,140 +32,95 @@ This document outlines the planned development roadmap for bazelbump. It reflect
 
 ---
 
-## Phase 1: 100% Starlark Authoring (Next)
+## Phase 1: 100% Starlark Authoring ✅ COMPLETE
 
 **Goal:** Enable users to write fully custom recipes without modifying Go code.
 
-### 1.1 File I/O Builtins
-
-Add builtins for reading files within the project (sandboxed):
+### 1.1 File I/O Builtins ✅
 
 ```starlark
-# Read file contents
 content = read_file("src/BUILD")
-content = read_file("config.yaml", default="")
-
-# Check existence
-if file_exists("MODULE.bazel"):
-    ...
-
-# List directory
+exists = file_exists("MODULE.bazel")
 files = list_dir("src/", recursive=True)
-
-# Glob patterns
 builds = glob("**/BUILD", exclude=["third_party/**"])
 ```
 
-**Implementation:**
-- [ ] `read_file(path, default=None)` - Read file as string
-- [ ] `read_json(path, default=None)` - Parse JSON file
-- [ ] `read_yaml(path, default=None)` - Parse YAML file
-- [ ] `file_exists(path)` - Check if file exists
-- [ ] `list_dir(path, recursive=False)` - List directory contents
-- [ ] `glob(pattern, exclude=[])` - Match files by pattern
+**Implemented:**
+- [x] `read_file(path, default=None)` - Read file as string
+- [x] `file_exists(path)` - Check if file exists
+- [x] `list_dir(path, recursive=False)` - List directory contents
+- [x] `glob(pattern, exclude=[])` - Match files by pattern
 
-### 1.2 Regex Module
-
-Embed starlib's `re` module for pattern matching:
+### 1.2 Regex Module ✅
 
 ```starlark
-# Match patterns
-if re.match(r"^bazel_dep\(", line):
-    ...
-
-# Find all matches
+if re.match(r"^bazel_dep\(", line): ...
 imports = re.findall(r'load\("([^"]+)"', content)
-
-# Substitution
 new_content = re.sub(r"--experimental_(\w+)", r"--\1", content)
 ```
 
-**Implementation:**
-- [ ] Embed `github.com/qri-io/starlib/re`
-- [ ] Expose as `re` module in interpreter
-- [ ] Add tests for regex operations
+**Implemented:**
+- [x] Embed `github.com/qri-io/starlib/re`
+- [x] Expose as `re` module in interpreter
 
-### 1.3 BUILD File Parsing
-
-Add structured access to BUILD file contents:
+### 1.3 BUILD File Parsing ✅
 
 ```starlark
-# Parse BUILD file
 build = parse_build_file("src/BUILD")
-
-# Query rules
 cc_rules = build.rules(kind="cc_*")
-for rule in cc_rules:
-    print(rule.name, rule.attr("srcs"))
-
-# Query loads
 loads = build.loads()
-for load in loads:
-    print(load.path, load.symbols)
 ```
 
-**Implementation:**
-- [ ] `parse_build_file(path)` - Parse BUILD to structured object
-- [ ] `BuildFile.rules(kind=None)` - Get rules, optionally filtered
-- [ ] `BuildFile.loads()` - Get load statements
-- [ ] `Rule.name`, `Rule.kind`, `Rule.attr(name)` - Rule accessors
+**Implemented:**
+- [x] `parse_build_file(path)` - Parse BUILD to structured object
+- [x] `BuildFile.rules(kind=None)` - Get rules, optionally filtered
+- [x] `BuildFile.loads()` - Get load statements
+- [x] `Rule.name`, `Rule.kind`, `Rule.attr(name)`, `Rule.line`
 
-### 1.4 Custom Scanner Functions
-
-Enable users to write custom scan logic:
+### 1.4 Custom Scanner Functions ✅
 
 ```starlark
 def find_deprecated_apis(ctx):
-    """Custom scanner - 100% user logic."""
     results = []
     for file in glob("**/*.go"):
         content = read_file(file)
         for match in re.findall(r"deprecated\.(\w+)\(", content):
-            results.append({
-                "file": file,
-                "api": match,
-                "line": find_line_number(content, match),
-            })
+            results.append({"file": file, "api": match})
     return results
 
-scan(
-    id = "deprecated-apis",
-    impl = find_deprecated_apis,
-)
+scan(id = "deprecated-apis", impl = find_deprecated_apis)
 ```
 
-**Implementation:**
-- [ ] Support `impl` parameter on `scan()` step
-- [ ] Pass `ctx` with project info to custom functions
-- [ ] Return value becomes step output for downstream steps
+**Implemented:**
+- [x] Support `impl` parameter on `scan()` step
+- [x] Pass `ctx` with project_path, dry_run, outputs
+- [x] Return value becomes step output for downstream steps
 
-### 1.5 Custom Transform Functions
-
-Enable users to generate operations dynamically:
+### 1.5 Custom Transform Functions ✅
 
 ```starlark
 def generate_fixes(ctx):
-    """Generate operations based on scan results."""
     ops = []
     for result in ctx.outputs["deprecated-apis"]:
-        ops.append(replace_text(
-            old = "deprecated." + result["api"],
-            new = "newpkg." + result["api"],
-            files = [result["file"]],
-        ))
+        ops.append(replace_text(old="deprecated." + result["api"], new="newpkg." + result["api"], files=[result["file"]]))
     return ops
 
-edit(
-    id = "apply-fixes",
-    operations = generate_fixes,
-    depends_on = ["deprecated-apis"],
-)
+edit(id = "apply-fixes", operations = generate_fixes, depends_on = ["deprecated-apis"])
 ```
 
-**Implementation:**
-- [ ] Support callable for `operations` parameter
-- [ ] Pass `ctx` with outputs from previous steps
-- [ ] Callable returns list of operations
+**Implemented:**
+- [x] Support callable for `operations` parameter
+- [x] Pass `ctx` with outputs from previous steps
+- [x] Callable returns list of operations
+
+### 1.6 Authoring UX ✅
+
+**Implemented:**
+- [x] `recipe validate` - Validate recipes without running
+- [x] `recipe builtins` - List/document available builtins
+- [x] `recipe init` - Scaffold recipes from templates
+- [x] Diff-style dry-run output with colors
+- [x] JSON output for tooling
 
 ---
 
