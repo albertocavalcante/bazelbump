@@ -215,6 +215,287 @@ Layer 3: User code (domain-specific)
 
 ---
 
+## Beyond Starlark: The Broader Code Transformation Ecosystem
+
+The Starlark ecosystem taught us about configuration and extensibility. But code transformation is a broader field with its own giants. These tools shaped our thinking about what's possible.
+
+### 9. OpenRewrite — The Recipe Revolution
+
+**What it is:** A semantic code transformation framework for Java/JVM ecosystems.
+
+**What we learned:**
+
+OpenRewrite popularized the "recipe" metaphor that bazelbump adopts. Their insight: migrations should be packaged, versioned, and shared:
+
+```yaml
+# OpenRewrite's recipe concept
+type: specs.openrewrite.org/v1beta/recipe
+name: org.openrewrite.java.spring.boot3.UpgradeSpringBoot_3_0
+recipeList:
+  - org.openrewrite.java.spring.boot2.UpgradeSpringBoot_2_7
+  - org.openrewrite.java.migrate.jakarta.JavaxMigrationToJakarta
+  - org.openrewrite.java.spring.boot3.RemoveConstructorBindingAnnotation
+```
+
+**Key insights adopted:**
+- **Recipes as the unit of migration** — Not scripts, but composable, testable units
+- **Semantic understanding** — Don't just match text; understand the language
+- **Recipe catalogs** — A community can share and build on each other's work
+- **Idempotency** — Run a recipe twice, get the same result
+
+**What we do differently:** OpenRewrite has deep JVM AST understanding. bazelbump has deep Bazel flag/version understanding. Different domains, same philosophy.
+
+---
+
+### 10. Sourcegraph Batch Changes — Scale and Observability
+
+**What it is:** Sourcegraph's system for making large-scale code changes across many repositories.
+
+**What we learned:**
+
+Batch Changes showed us that migrations at scale need visibility and control:
+
+```yaml
+# Sourcegraph batch spec
+name: update-log-library
+on:
+  - repositoriesMatchingQuery: lang:go log.Printf
+
+steps:
+  - run: comby -in-place 'log.Printf(:[args])' 'slog.Info(:[args])' .go
+    container: comby/comby
+
+changesetTemplate:
+  title: Migrate from log to slog
+  body: Automated migration using batch changes
+```
+
+**Key insights adopted:**
+- **Dry-run is essential** — Always preview before applying
+- **Progress tracking** — Know what changed, what failed, what's pending
+- **Changesets as artifacts** — The output is reviewable, not just "done"
+- **Multi-repo thinking** — Even if we target one repo, design for many
+
+**What we do differently:** Sourcegraph orchestrates across repos. bazelbump goes deep within one repo with Bazel-specific knowledge.
+
+---
+
+### 11. Comby — Structural Matching for Humans
+
+**What it is:** A language-agnostic tool for structural code search and replace.
+
+**What we learned:**
+
+Comby proved that you don't need a full parser to do structural matching. Its template syntax is brilliantly simple:
+
+```bash
+# Comby's structural matching
+comby 'log.Printf(:[format], :[args])' 'slog.Info(:[format], :[args])' .go
+
+# Handles nested structures correctly
+comby 'if err != nil { return :[...] }' 'if err != nil { return fmt.Errorf("wrapped: %w", err) }' .go
+```
+
+**Key insights adopted:**
+- **Structural > textual** — `:[hole]` beats regex for code
+- **Language-aware but parser-free** — Understand balanced delimiters without full AST
+- **Simplicity wins** — A simple pattern language beats a powerful but complex one
+
+**What we do differently:** Comby is general-purpose. bazelbump has specialized patterns for BUILD files and .bazelrc that understand Bazel semantics.
+
+---
+
+### 12. Semgrep — Security Meets Migration
+
+**What it is:** A static analysis tool that can also autofix code.
+
+**What we learned:**
+
+Semgrep showed us that finding and fixing are two sides of the same coin:
+
+```yaml
+# Semgrep rule with autofix
+rules:
+  - id: use-secure-random
+    pattern: Math.random()
+    fix: crypto.randomUUID()
+    message: Use crypto.randomUUID() for secure randomness
+    languages: [javascript]
+    severity: WARNING
+```
+
+**Key insights adopted:**
+- **Find and fix together** — Detection without remediation is incomplete
+- **Severity levels** — Not all issues are equal
+- **Human-readable messages** — Explain *why*, not just *what*
+- **Rule catalogs** — Community-contributed patterns
+
+**What we do differently:** Semgrep focuses on security patterns. bazelbump focuses on migration patterns. Both use the find-then-fix model.
+
+---
+
+### 13. ast-grep — The Modern Grep for Code
+
+**What it is:** A fast, AST-based code search and replace tool.
+
+**What we learned:**
+
+ast-grep showed us the power of combining grep's speed with AST understanding:
+
+```yaml
+# ast-grep rule
+id: no-console-log
+language: typescript
+rule:
+  pattern: console.log($$$)
+fix: "logger.info($$$)"
+```
+
+**Key insights adopted:**
+- **Speed matters** — Migrations should be fast, not overnight jobs
+- **Pattern syntax** — `$$$` for multiple arguments, `$_` for single match
+- **YAML rules** — Configuration should be simple and versionable
+
+**What we do differently:** ast-grep works on general source code. bazelbump specializes in Bazel artifacts (BUILD, .bazelrc, MODULE.bazel).
+
+---
+
+### 14. jscodeshift — The Codemod Standard
+
+**What it is:** Facebook's toolkit for running codemods on JavaScript/TypeScript.
+
+**What we learned:**
+
+jscodeshift established patterns that the entire JS ecosystem adopted:
+
+```javascript
+// jscodeshift transform
+export default function transformer(file, api) {
+  const j = api.jscodeshift;
+
+  return j(file.source)
+    .find(j.CallExpression, { callee: { name: 'require' } })
+    .replaceWith(path => {
+      return j.importDeclaration(
+        [j.importDefaultSpecifier(j.identifier('mod'))],
+        path.node.arguments[0]
+      );
+    })
+    .toSource();
+}
+```
+
+**Key insights adopted:**
+- **AST-to-AST transforms** — Preserve formatting, comments, structure
+- **The transform function signature** — `(file, api) => result`
+- **Community codemods** — react-codemod, next-codemod, etc.
+
+**What we do differently:** jscodeshift requires JavaScript. bazelbump uses Starlark, which Bazel developers already know.
+
+---
+
+### 15. Scalafix — Compiler-Integrated Migration
+
+**What it is:** A refactoring and linting tool for Scala, integrated with the compiler.
+
+**What we learned:**
+
+Scalafix showed us the power of compiler integration:
+
+```scala
+// Scalafix rule
+class RemoveUnused extends SemanticRule("RemoveUnused") {
+  override def fix(implicit doc: SemanticDocument): Patch = {
+    doc.tree.collect {
+      case importer @ Importer(_, importees) =>
+        importees.collect {
+          case i: Importee if !i.symbol.isUsed => Patch.removeImportee(i)
+        }
+    }.flatten.asPatch
+  }
+}
+```
+
+**Key insights adopted:**
+- **Semantic information** — Know what's used, what's unused
+- **Compiler as source of truth** — The compiler knows things grep doesn't
+- **Patch-based API** — Build up patches, apply atomically
+
+**What we do differently:** Scalafix has the Scala compiler. bazelbump has the Bazel flag database—our "compiler" for flags.
+
+---
+
+### 16. go fix — Built Into the Language
+
+**What it is:** Go's built-in tool for updating code when APIs change.
+
+**What we learned:**
+
+Go's approach is radical: migration tooling ships with the language:
+
+```bash
+# Go's built-in migration
+go fix ./...
+
+# Automatically updates code for Go version changes
+# Part of the language, not an afterthought
+```
+
+**Key insights adopted:**
+- **Migration as first-class concern** — Not a third-party tool, but core infrastructure
+- **Automated by default** — `go fix` just runs; no configuration needed
+- **Version-aware** — Knows what changed between Go versions
+
+**What we do differently:** `go fix` is Go-specific and limited to Go API changes. bazelbump is Bazel-specific and knows Bazel flag lifecycles.
+
+---
+
+### 17. Bowler & LibCST — Python's Refactoring Stack
+
+**What it is:** Facebook's Python refactoring tools built on concrete syntax trees.
+
+**What we learned:**
+
+LibCST showed us that preserving formatting requires concrete (not abstract) syntax trees:
+
+```python
+# LibCST transform
+class RenameVisitor(cst.CSTTransformer):
+    def leave_Name(self, original: cst.Name, updated: cst.Name) -> cst.Name:
+        if original.value == "old_name":
+            return updated.with_changes(value="new_name")
+        return updated
+
+# Preserves whitespace, comments, formatting
+```
+
+**Key insights adopted:**
+- **Concrete syntax trees** — Preserve everything, not just semantics
+- **Visitor pattern** — Walk the tree, transform what you need
+- **Formatting preservation** — After migration, code should still look like yours
+
+**What we do differently:** LibCST works on Python. bazelbump works on Starlark (BUILD files), which is similar but specialized.
+
+---
+
+## How These Influenced bazelbump
+
+From the broader ecosystem, we adopted:
+
+| Tool | Key Lesson | How We Applied It |
+|------|------------|-------------------|
+| **OpenRewrite** | Recipes as composable units | Our recipe system with steps and operations |
+| **Sourcegraph** | Scale needs observability | Dry-run mode, detailed change reporting |
+| **Comby** | Structural > textual matching | Pattern-based flag and rule matching |
+| **Semgrep** | Find + fix together | Scan steps feed into edit steps |
+| **ast-grep** | Speed matters | Efficient glob and pattern matching |
+| **jscodeshift** | Community codemods | Recipe discovery and sharing |
+| **Scalafix** | Compiler integration | Bazel flag database as our "compiler" |
+| **go fix** | Migration as first-class | Built-in recipes for common migrations |
+| **LibCST** | Preserve formatting | Careful edits that respect existing style |
+
+---
+
 ## How bazelbump Synthesizes These Ideas
 
 ### Our Execution Model
@@ -375,6 +656,7 @@ verify(command = "buildifier -lint=fix")
 
 We are grateful to the teams behind:
 
+### The Starlark Ecosystem
 - **Copybara** — For proving Starlark could power transformations
 - **Aspect** — For showing the way to 100% Starlark extensibility
 - **Buck2** — For the rigorous action/artifact model
@@ -384,6 +666,18 @@ We are grateful to the teams behind:
 - **Starlib** — For the embeddable standard library
 - **lucicfg** — For the layered architecture approach
 
+### The Code Transformation Ecosystem
+- **OpenRewrite** — For pioneering the recipe model and proving migrations can be shared
+- **Sourcegraph** — For showing how to do migrations at scale with visibility
+- **Comby** — For proving structural matching doesn't need a full parser
+- **Semgrep** — For unifying finding and fixing in one tool
+- **ast-grep** — For showing that speed and AST-awareness can coexist
+- **jscodeshift** — For establishing the codemod pattern that inspired a generation
+- **Scalafix** — For demonstrating compiler-integrated refactoring
+- **The Go team** — For building `go fix` into the language itself
+- **Bowler & LibCST** — For the concrete syntax tree insight that preserves formatting
+
+### The Foundation
 And to the Starlark language designers at Google, whose decision to create a simple, hermetic, Python-like language made all of this possible.
 
 ---
@@ -392,6 +686,7 @@ And to the Starlark language designers at Google, whose decision to create a sim
 
 bazelbump's recipe system is not novel in its individual parts. Its value lies in the synthesis:
 
+**From the Starlark ecosystem:**
 - **Copybara's** declarative transformations
 - **Orion's** staged execution and future references
 - **Kurtosis's** three-phase model with upfront validation
@@ -399,6 +694,16 @@ bazelbump's recipe system is not novel in its individual parts. Its value lies i
 - **Cirrus's** safety-first file access
 - **Starlib's** embeddable modules
 - **lucicfg's** layered architecture
+
+**From the code transformation ecosystem:**
+- **OpenRewrite's** recipe-as-unit model
+- **Sourcegraph's** dry-run and observability patterns
+- **Comby's** structural matching philosophy
+- **Semgrep's** find-and-fix unity
+- **jscodeshift's** community codemod culture
+- **Scalafix's** compiler integration
+- **go fix's** migration-as-first-class-citizen
+- **LibCST's** formatting preservation
 
 Combined with deep Bazel version knowledge and migration-specific primitives, this creates a tool uniquely suited to helping teams upgrade Bazel safely and systematically.
 
