@@ -460,6 +460,13 @@ type Match struct {
 	Family string
 }
 
+// FileTracker is an optional interface for tracking file modifications.
+// This is used by the undo/snapshot system to track which files are modified.
+type FileTracker interface {
+	// TrackFile is called before a file is modified.
+	TrackFile(path string) error
+}
+
 // Context holds runtime state during recipe execution.
 // The ctx object is available to dynamic operations in Starlark.
 type Context struct {
@@ -485,6 +492,17 @@ type Context struct {
 
 	// Logger provides logging functions for recipe steps.
 	Logger Logger
+
+	// Tracker is an optional file tracker for undo support.
+	Tracker FileTracker
+}
+
+// TrackFile calls the tracker if available. Should be called before modifying a file.
+func (c *Context) TrackFile(path string) error {
+	if c.Tracker != nil && !c.DryRun {
+		return c.Tracker.TrackFile(path)
+	}
+	return nil
 }
 
 // FileChange records a modification to a file.

@@ -49,6 +49,7 @@ type Executor struct {
 	dryRun      bool
 	verbose     bool
 	logger      Logger
+	tracker     FileTracker
 }
 
 // NewExecutor creates a new executor for Starlark recipes.
@@ -59,17 +60,19 @@ func NewExecutor(projectPath string, opts Options) *Executor {
 		dryRun:      opts.DryRun,
 		verbose:     opts.Verbose,
 		logger:      opts.Logger,
+		tracker:     opts.Tracker,
 	}
 }
 
 // Options configures recipe execution.
 type Options struct {
-	DryRun      bool   // Preview changes without applying
-	Verbose     bool   // Verbose output
-	StepID      string // Run only specific step (empty = all)
-	NoVerify    bool   // Skip verification steps
-	StopOnError bool   // Stop on first error (default: true for execution)
-	Logger      Logger // Logger for output (optional)
+	DryRun      bool        // Preview changes without applying
+	Verbose     bool        // Verbose output
+	StepID      string      // Run only specific step (empty = all)
+	NoVerify    bool        // Skip verification steps
+	StopOnError bool        // Stop on first error (default: true for execution)
+	Logger      Logger      // Logger for output (optional)
+	Tracker     FileTracker // Optional file tracker for undo support
 }
 
 // Result is the outcome of running a recipe.
@@ -452,6 +455,7 @@ func (e *Executor) execute(recipe *Recipe, opts Options) (*Result, error) {
 		Verbose:     e.verbose || opts.Verbose,
 		Outputs:     make(map[string]any),
 		Changes:     make([]*FileChange, 0),
+		Tracker:     e.tracker,
 	}
 
 	result := &Result{
@@ -1025,6 +1029,9 @@ func (e *Executor) removeLoadFromFile(ctx *Context, file, rule string) (*FileCha
 	change.PopulateHunks()
 
 	if !ctx.DryRun {
+		if err := ctx.TrackFile(file); err != nil {
+			return nil, fmt.Errorf("failed to track file %s: %w", file, err)
+		}
 		if err := os.WriteFile(file, newContent, 0644); err != nil {
 			return nil, err
 		}
@@ -1078,6 +1085,9 @@ func (e *Executor) ensureLoadInFile(ctx *Context, file, rule, loadFrom string) (
 	change.PopulateHunks()
 
 	if !ctx.DryRun {
+		if err := ctx.TrackFile(file); err != nil {
+			return nil, fmt.Errorf("failed to track file %s: %w", file, err)
+		}
 		if err := os.WriteFile(file, newContent, 0644); err != nil {
 			return nil, err
 		}
@@ -1168,6 +1178,9 @@ func (e *Executor) ensureLoadsForMatches(ctx *Context, file string, matches []Ma
 	change.PopulateHunks()
 
 	if !ctx.DryRun {
+		if err := ctx.TrackFile(file); err != nil {
+			return nil, fmt.Errorf("failed to track file %s: %w", file, err)
+		}
 		if err := os.WriteFile(file, newContent, 0644); err != nil {
 			return nil, err
 		}
@@ -1269,6 +1282,9 @@ func (e *Executor) opEnsureBazelDep(ctx *Context, op *EnsureBazelDepOp) ([]*File
 	change.PopulateHunks()
 
 	if !ctx.DryRun {
+		if err := ctx.TrackFile(modulePath); err != nil {
+			return nil, fmt.Errorf("failed to track file %s: %w", modulePath, err)
+		}
 		if err := os.WriteFile(modulePath, newContent, 0644); err != nil {
 			return nil, err
 		}
@@ -1307,6 +1323,9 @@ func (e *Executor) opUpdateBazelDep(ctx *Context, op *UpdateBazelDepOp) ([]*File
 	change.PopulateHunks()
 
 	if !ctx.DryRun {
+		if err := ctx.TrackFile(modulePath); err != nil {
+			return nil, fmt.Errorf("failed to track file %s: %w", modulePath, err)
+		}
 		if err := os.WriteFile(modulePath, []byte(newContentStr), 0644); err != nil {
 			return nil, err
 		}
@@ -1354,6 +1373,9 @@ func (e *Executor) opRemoveBazelDep(ctx *Context, op *RemoveBazelDepOp) ([]*File
 	change.PopulateHunks()
 
 	if !ctx.DryRun {
+		if err := ctx.TrackFile(modulePath); err != nil {
+			return nil, fmt.Errorf("failed to track file %s: %w", modulePath, err)
+		}
 		if err := os.WriteFile(modulePath, newContent, 0644); err != nil {
 			return nil, err
 		}
@@ -1411,6 +1433,9 @@ func (e *Executor) opRemoveFlag(ctx *Context, op *RemoveFlagOp) ([]*FileChange, 
 	change.PopulateHunks()
 
 	if !ctx.DryRun {
+		if err := ctx.TrackFile(filePath); err != nil {
+			return nil, fmt.Errorf("failed to track file %s: %w", filePath, err)
+		}
 		if err := os.WriteFile(filePath, newContent, 0644); err != nil {
 			return nil, err
 		}
@@ -1449,6 +1474,9 @@ func (e *Executor) opReplaceFlag(ctx *Context, op *ReplaceFlagOp) ([]*FileChange
 	change.PopulateHunks()
 
 	if !ctx.DryRun {
+		if err := ctx.TrackFile(filePath); err != nil {
+			return nil, fmt.Errorf("failed to track file %s: %w", filePath, err)
+		}
 		if err := os.WriteFile(filePath, []byte(newContent), 0644); err != nil {
 			return nil, err
 		}
@@ -1508,6 +1536,9 @@ func (e *Executor) opEnsureFlag(ctx *Context, op *EnsureFlagOp) ([]*FileChange, 
 	change.PopulateHunks()
 
 	if !ctx.DryRun {
+		if err := ctx.TrackFile(filePath); err != nil {
+			return nil, fmt.Errorf("failed to track file %s: %w", filePath, err)
+		}
 		if err := os.WriteFile(filePath, []byte(newContent), 0644); err != nil {
 			return nil, err
 		}
@@ -1582,6 +1613,9 @@ func (e *Executor) replaceTextInFile(ctx *Context, file string, op *ReplaceTextO
 	change.PopulateHunks()
 
 	if !ctx.DryRun {
+		if err := ctx.TrackFile(file); err != nil {
+			return nil, fmt.Errorf("failed to track file %s: %w", file, err)
+		}
 		if err := os.WriteFile(file, []byte(newContent), 0644); err != nil {
 			return nil, err
 		}
@@ -1609,6 +1643,9 @@ func (e *Executor) opCopyFile(ctx *Context, op *CopyFileOp) ([]*FileChange, erro
 	change.PopulateHunks()
 
 	if !ctx.DryRun {
+		if err := ctx.TrackFile(dst); err != nil {
+			return nil, fmt.Errorf("failed to track file %s: %w", dst, err)
+		}
 		if err := os.WriteFile(dst, content, 0644); err != nil {
 			return nil, err
 		}
@@ -1648,6 +1685,9 @@ func (e *Executor) opDeleteFile(ctx *Context, op *DeleteFileOp) ([]*FileChange, 
 		change.PopulateHunks()
 
 		if !ctx.DryRun {
+			if err := ctx.TrackFile(file); err != nil {
+				return changes, fmt.Errorf("failed to track file %s: %w", file, err)
+			}
 			if err := os.Remove(file); err != nil {
 				return changes, err
 			}

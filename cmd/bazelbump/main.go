@@ -102,6 +102,12 @@ func main() {
 		err = runApply(args)
 	case "recipe":
 		err = runRecipe(args)
+	case "status":
+		err = runStatus(args)
+	case "undo":
+		err = runUndo(args)
+	case "snapshot":
+		err = runSnapshot(args)
 	case "version", "-v", "--version":
 		runVersion()
 		return
@@ -132,6 +138,9 @@ func printUsage() {
   diff      Show flag changes between Bazel versions
   flags     List flags for a Bazel version
   recipe    Run migration recipes
+  status    Show status of last bazelbump run
+  undo      Undo the last bazelbump run
+  snapshot  Manage snapshots (for non-git directories)
   version   Show bazelbump version
 
 %s
