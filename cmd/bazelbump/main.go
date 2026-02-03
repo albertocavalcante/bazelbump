@@ -10,6 +10,7 @@
 // Commands:
 //
 //	analyze   Analyze a project for Bazel upgrade issues
+//	apply     Apply transforms to fix detected flag issues
 //	diff      Show flag changes between Bazel versions
 //	flags     List flags for a Bazel version
 //	version   Show bazelbump version
@@ -33,6 +34,8 @@ import (
 
 	"github.com/albertocavalcante/bazelbump/analysis"
 	"github.com/albertocavalcante/bazelbump/flagdb"
+	"github.com/albertocavalcante/bazelbump/recipe"
+	"github.com/albertocavalcante/bazelbump/transform"
 )
 
 // Version info set by build flags
@@ -94,6 +97,10 @@ func main() {
 		err = runDiff(args)
 	case "flags":
 		err = runFlags(args)
+	case "apply":
+		err = runApply(args)
+	case "recipe":
+		err = runRecipe(args)
 	case "version", "-v", "--version":
 		runVersion()
 		return
@@ -120,15 +127,20 @@ func printUsage() {
 
 %s
   analyze   Analyze a project for Bazel upgrade issues
+  apply     Apply transforms to fix detected flag issues
   diff      Show flag changes between Bazel versions
   flags     List flags for a Bazel version
+  recipe    Run migration recipes
   version   Show bazelbump version
 
 %s
   bazelbump analyze --to 9.0.0
   bazelbump analyze --from 8.0.0 --to 9.0.0 --path /path/to/project
+  bazelbump apply --to 9.0.0 --dry-run
   bazelbump diff --from 8.0.0 --to 9.0.0
   bazelbump flags --version 9.0.0 --incompatible
+  bazelbump recipe list
+  bazelbump recipe run autoload-migration --dry-run
 
 Use "bazelbump <command> --help" for more information about a command.
 `, color(colorBold, "bazelbump"),
@@ -373,6 +385,154 @@ func outputAnalysisText(result *analysis.AnalysisResult) {
 		parts = append(parts, fmt.Sprintf("%d changed defaults", len(changed)))
 	}
 	fmt.Println(strings.Join(parts, ", "))
+}
+
+// --- apply command ---
+
+func runApply(args []string) error {
+	fs := flag.NewFlagSet("apply", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Apply transforms to fix detected flag issues.
+
+%s
+  bazelbump apply --to <version> [flags]
+
+%s
+  --to         Target Bazel version (required)
+  --from       Source Bazel version (default: auto-detect)
+  --path       Path to project directory (default: current directory)
+  --dry-run    Show what would change without applying
+  --help       Show this help
+
+%s
+  bazelbump apply --to 9.0.0 --dry-run
+  bazelbump apply --to 9.0.0
+  bazelbump apply --from 8.0.0 --to 9.0.0 --path /path/to/project
+`, color(colorBold, "Usage:"),
+			color(colorBold, "Flags:"),
+			color(colorBold, "Examples:"))
+	}
+
+	toVersion := fs.String("to", "", "Target Bazel version (required)")
+	fromVersion := fs.String("from", "", "Source Bazel version")
+	projectPath := fs.String("path", ".", "Path to project directory")
+	dryRun := fs.Bool("dry-run", false, "Show what would change without applying")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if *toVersion == "" {
+		return fmt.Errorf("--to version is required")
+	}
+
+	db, err := loadFlagDB()
+	if err != nil {
+		return err
+	}
+
+	// If from version not specified, try to find the previous major version
+	if *fromVersion == "" {
+		*fromVersion = findPreviousVersion(db, *toVersion)
+		if *fromVersion == "" {
+			return fmt.Errorf("could not determine source version; please specify --from")
+		}
+	}
+
+	// Validate versions exist
+	if !db.HasVersion(*fromVersion) {
+		return fmt.Errorf("unknown from version: %s", *fromVersion)
+	}
+	if !db.HasVersion(*toVersion) {
+		return fmt.Errorf("unknown to version: %s", *toVersion)
+	}
+
+	// Step 1: Run analysis to get issues
+	fmt.Printf("%s Analyzing upgrade from Bazel %s to %s\n",
+		color(colorBlue, "==>"),
+		color(colorCyan, *fromVersion),
+		color(colorCyan, *toVersion))
+	fmt.Printf("    Project: %s\n", *projectPath)
+
+	analyzer := analysis.New(
+		analysis.WithProjectPath(*projectPath),
+		analysis.WithFromVersion(*fromVersion),
+		analysis.WithToVersion(*toVersion),
+		analysis.WithFlagDB(db),
+	)
+
+	result, err := analyzer.Analyze()
+	if err != nil {
+		return fmt.Errorf("analysis failed: %w", err)
+	}
+
+	fmt.Printf("    Files scanned: %d\n\n", result.FilesScanned)
+
+	if !result.HasIssues() {
+		fmt.Printf("%s No issues found! Nothing to apply.\n", color(colorGreen, "[OK]"))
+		return nil
+	}
+
+	// Step 2: Generate patches
+	fmt.Printf("%s Found %d issue(s), generating patches...\n",
+		color(colorBlue, "==>"),
+		len(result.FlagIssues))
+
+	// Convert []FlagIssue to []*FlagIssue for GeneratePatches
+	var issues []*analysis.FlagIssue
+	for i := range result.FlagIssues {
+		issues = append(issues, &result.FlagIssues[i])
+	}
+
+	patches, err := transform.GeneratePatches(issues)
+	if err != nil {
+		return fmt.Errorf("failed to generate patches: %w", err)
+	}
+
+	if len(patches) == 0 {
+		fmt.Printf("%s No automatic fixes available for the detected issues.\n", color(colorYellow, "[WARN]"))
+		fmt.Println("    Some issues may require manual intervention.")
+		return nil
+	}
+
+	// Step 3: Show patches and apply (or dry-run)
+	if *dryRun {
+		fmt.Printf("\n%s Dry run - showing patches that would be applied:\n\n",
+			color(colorBlue, "==>"))
+		if err := transform.ApplyPatches(patches, true); err != nil {
+			return fmt.Errorf("failed to show patches: %w", err)
+		}
+		fmt.Printf("\n%s Dry run complete. %d patch(es) would be applied.\n",
+			color(colorGreen, "[OK]"),
+			len(patches))
+		fmt.Println("    Run without --dry-run to apply changes.")
+	} else {
+		fmt.Printf("\n%s Applying %d patch(es)...\n\n",
+			color(colorBlue, "==>"),
+			len(patches))
+
+		// Show what will be changed
+		filesModified := make(map[string]int)
+		for _, p := range patches {
+			filesModified[p.File]++
+		}
+
+		for file, count := range filesModified {
+			fmt.Printf("    %s: %d change(s)\n", file, count)
+		}
+		fmt.Println()
+
+		if err := transform.ApplyPatches(patches, false); err != nil {
+			return fmt.Errorf("failed to apply patches: %w", err)
+		}
+
+		fmt.Printf("%s Successfully applied %d patch(es) to %d file(s).\n",
+			color(colorGreen, "[OK]"),
+			len(patches),
+			len(filesModified))
+	}
+
+	return nil
 }
 
 // --- diff command ---
@@ -716,4 +876,418 @@ func runVersion() {
 		fmt.Printf("  built:  %s\n", BuildDate)
 	}
 	fmt.Printf("  go:     %s\n", runtime.Version())
+}
+
+// --- recipe command ---
+
+func runRecipe(args []string) error {
+	if len(args) < 1 {
+		printRecipeUsage()
+		return fmt.Errorf("recipe subcommand required")
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
+
+	switch subcmd {
+	case "list":
+		return runRecipeList(subargs)
+	case "show":
+		return runRecipeShow(subargs)
+	case "run":
+		return runRecipeRun(subargs)
+	case "help", "-h", "--help":
+		printRecipeUsage()
+		return nil
+	default:
+		printRecipeUsage()
+		return fmt.Errorf("unknown recipe subcommand: %s", subcmd)
+	}
+}
+
+func printRecipeUsage() {
+	fmt.Fprintf(os.Stderr, `Run migration recipes.
+
+%s
+  bazelbump recipe <subcommand> [flags]
+
+%s
+  list    List available recipes
+  show    Show recipe details
+  run     Run a recipe
+
+%s
+  bazelbump recipe list
+  bazelbump recipe show autoload-migration
+  bazelbump recipe run autoload-migration --dry-run
+  bazelbump recipe run autoload-migration --step detect-native-rules
+
+Use "bazelbump recipe <subcommand> --help" for more information.
+`, color(colorBold, "Usage:"),
+		color(colorBold, "Subcommands:"),
+		color(colorBold, "Examples:"))
+}
+
+func runRecipeList(args []string) error {
+	fs := flag.NewFlagSet("recipe list", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, `List available recipes.
+
+%s
+  bazelbump recipe list [flags]
+
+%s
+  --json   Output results as JSON
+  --help   Show this help
+`, color(colorBold, "Usage:"),
+			color(colorBold, "Flags:"))
+	}
+
+	jsonOutput := fs.Bool("json", false, "Output results as JSON")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	engine := recipe.NewEngine()
+	recipes := engine.List()
+
+	if *jsonOutput {
+		return outputRecipeListJSON(recipes)
+	}
+
+	outputRecipeListText(recipes)
+	return nil
+}
+
+func outputRecipeListJSON(recipes []recipe.RecipeSummary) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(recipes)
+}
+
+func outputRecipeListText(recipes []recipe.RecipeSummary) {
+	if len(recipes) == 0 {
+		fmt.Println("No recipes available.")
+		return
+	}
+
+	fmt.Printf("%s Available recipes:\n\n", color(colorBlue, "==>"))
+
+	// Calculate column widths
+	maxNameLen := 4 // "NAME"
+	for _, r := range recipes {
+		if len(r.Name) > maxNameLen {
+			maxNameLen = len(r.Name)
+		}
+	}
+
+	// Print header
+	fmt.Printf("  %-*s  %-8s  %s\n", maxNameLen, "NAME", "VERSION", "DESCRIPTION")
+	fmt.Printf("  %s  %s  %s\n", strings.Repeat("-", maxNameLen), "--------", "-----------")
+
+	// Print recipes
+	for _, r := range recipes {
+		desc := r.Description
+		if len(desc) > 50 {
+			desc = desc[:47] + "..."
+		}
+		fmt.Printf("  %-*s  %-8s  %s\n", maxNameLen, r.Name, r.Version, desc)
+	}
+
+	fmt.Printf("\nTotal: %d recipe(s)\n", len(recipes))
+}
+
+func runRecipeShow(args []string) error {
+	fs := flag.NewFlagSet("recipe show", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Show recipe details.
+
+%s
+  bazelbump recipe show <name> [flags]
+
+%s
+  --json   Output results as JSON
+  --help   Show this help
+
+%s
+  bazelbump recipe show autoload-migration
+`, color(colorBold, "Usage:"),
+			color(colorBold, "Flags:"),
+			color(colorBold, "Examples:"))
+	}
+
+	jsonOutput := fs.Bool("json", false, "Output results as JSON")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if fs.NArg() < 1 {
+		fs.Usage()
+		return fmt.Errorf("recipe name required")
+	}
+
+	name := fs.Arg(0)
+
+	engine := recipe.NewEngine()
+	r, ok := engine.Get(name)
+	if !ok {
+		return fmt.Errorf("unknown recipe: %s", name)
+	}
+
+	if *jsonOutput {
+		return outputRecipeShowJSON(r)
+	}
+
+	outputRecipeShowText(r)
+	return nil
+}
+
+func outputRecipeShowJSON(r *recipe.Recipe) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(r)
+}
+
+func outputRecipeShowText(r *recipe.Recipe) {
+	fmt.Printf("%s Recipe: %s\n\n", color(colorBlue, "==>"), color(colorBold, r.Name))
+	fmt.Printf("  Version:     %s\n", r.Version)
+	fmt.Printf("  Description: %s\n", r.Description)
+
+	if r.MinBazelVersion != "" || r.MaxBazelVersion != "" {
+		fmt.Printf("  Bazel:       ")
+		if r.MinBazelVersion != "" && r.MaxBazelVersion != "" {
+			fmt.Printf("%s - %s\n", r.MinBazelVersion, r.MaxBazelVersion)
+		} else if r.MinBazelVersion != "" {
+			fmt.Printf(">= %s\n", r.MinBazelVersion)
+		} else {
+			fmt.Printf("<= %s\n", r.MaxBazelVersion)
+		}
+	}
+
+	fmt.Printf("\n%s (%d total)\n", color(colorBold, "Steps:"), len(r.Steps))
+
+	for i, step := range r.Steps {
+		stepType := getStepType(&step)
+		fmt.Printf("\n  %d. %s (%s)\n", i+1, color(colorCyan, step.Name), stepType)
+		fmt.Printf("     ID: %s\n", step.ID)
+		if step.Description != "" {
+			fmt.Printf("     %s\n", step.Description)
+		}
+		if len(step.DependsOn) > 0 {
+			fmt.Printf("     Depends on: %s\n", strings.Join(step.DependsOn, ", "))
+		}
+	}
+}
+
+func getStepType(step *recipe.Step) string {
+	if step.Scan != nil {
+		return "scan"
+	}
+	if step.Edit != nil {
+		return "edit"
+	}
+	if step.Verify != nil {
+		return "verify"
+	}
+	return "unknown"
+}
+
+func runRecipeRun(args []string) error {
+	fs := flag.NewFlagSet("recipe run", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, `Run a recipe.
+
+%s
+  bazelbump recipe run <name> [flags]
+
+%s
+  --dry-run    Show what would change without applying
+  --path       Path to project directory (default: current directory)
+  --step       Run only a specific step (by ID)
+  --verbose    Show verbose output
+  --json       Output results as JSON
+  --help       Show this help
+
+%s
+  bazelbump recipe run autoload-migration
+  bazelbump recipe run autoload-migration --dry-run
+  bazelbump recipe run autoload-migration --path /path/to/project
+  bazelbump recipe run autoload-migration --step detect-native-rules
+`, color(colorBold, "Usage:"),
+			color(colorBold, "Flags:"),
+			color(colorBold, "Examples:"))
+	}
+
+	dryRun := fs.Bool("dry-run", false, "Show what would change without applying")
+	projectPath := fs.String("path", ".", "Path to project directory")
+	stepID := fs.String("step", "", "Run only a specific step")
+	verbose := fs.Bool("verbose", false, "Show verbose output")
+	jsonOutput := fs.Bool("json", false, "Output results as JSON")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if fs.NArg() < 1 {
+		fs.Usage()
+		return fmt.Errorf("recipe name required")
+	}
+
+	name := fs.Arg(0)
+
+	engine := recipe.NewEngine()
+
+	// Verify recipe exists
+	if _, ok := engine.Get(name); !ok {
+		return fmt.Errorf("unknown recipe: %s", name)
+	}
+
+	opts := recipe.Options{
+		ProjectPath: *projectPath,
+		DryRun:      *dryRun,
+		StepID:      *stepID,
+		Verbose:     *verbose,
+	}
+
+	result, err := engine.Run(name, opts)
+	if err != nil {
+		return fmt.Errorf("recipe execution failed: %w", err)
+	}
+
+	if *jsonOutput {
+		return outputRecipeRunJSON(result)
+	}
+
+	outputRecipeRunText(result, *dryRun)
+
+	if !result.Success {
+		os.Exit(1)
+	}
+	return nil
+}
+
+// recipeRunOutput is used for JSON serialization of recipe results
+type recipeRunOutput struct {
+	Recipe      string             `json:"recipe"`
+	Success     bool               `json:"success"`
+	StepsRun    int                `json:"steps_run"`
+	StepResults []stepResultOutput `json:"step_results"`
+	Changes     []changeInfoOutput `json:"changes"`
+	Error       string             `json:"error,omitempty"`
+}
+
+type stepResultOutput struct {
+	StepID      string `json:"step_id"`
+	StepName    string `json:"step_name"`
+	Success     bool   `json:"success"`
+	Description string `json:"description,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
+type changeInfoOutput struct {
+	Path        string `json:"path"`
+	Description string `json:"description"`
+}
+
+func outputRecipeRunJSON(result *recipe.Result) error {
+	out := recipeRunOutput{
+		Recipe:   result.Recipe,
+		Success:  result.Success,
+		StepsRun: result.StepsRun,
+	}
+
+	if result.Error != nil {
+		out.Error = result.Error.Error()
+	}
+
+	for _, sr := range result.StepResults {
+		sro := stepResultOutput{
+			StepID:      sr.StepID,
+			StepName:    sr.StepName,
+			Success:     sr.Success,
+			Description: sr.Description,
+		}
+		if sr.Error != nil {
+			sro.Error = sr.Error.Error()
+		}
+		out.StepResults = append(out.StepResults, sro)
+	}
+
+	for _, c := range result.Changes {
+		out.Changes = append(out.Changes, changeInfoOutput{
+			Path:        c.Path,
+			Description: c.Description,
+		})
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+func outputRecipeRunText(result *recipe.Result, dryRun bool) {
+	modeStr := ""
+	if dryRun {
+		modeStr = " " + color(colorYellow, "(dry-run)")
+	}
+
+	fmt.Printf("%s Running recipe: %s%s\n\n", color(colorBlue, "==>"), color(colorBold, result.Recipe), modeStr)
+
+	// Show step results
+	for _, sr := range result.StepResults {
+		status := color(colorGreen, "[OK]")
+		if !sr.Success {
+			status = color(colorRed, "[FAIL]")
+		}
+
+		fmt.Printf("  %s %s\n", status, sr.StepName)
+		if sr.Description != "" && sr.Success {
+			fmt.Printf("      %s\n", sr.Description)
+		}
+		if sr.Error != nil {
+			fmt.Printf("      %s %s\n", color(colorRed, "error:"), sr.Error)
+		}
+	}
+
+	// Show changes
+	if len(result.Changes) > 0 {
+		fmt.Printf("\n%s\n", color(colorBold, "Changes:"))
+		for _, c := range result.Changes {
+			if dryRun {
+				fmt.Printf("  %s %s\n", color(colorYellow, "[would change]"), c.Path)
+			} else {
+				fmt.Printf("  %s %s\n", color(colorGreen, "[changed]"), c.Path)
+			}
+			fmt.Printf("      %s\n", c.Description)
+		}
+	}
+
+	// Summary
+	fmt.Println()
+	if result.Success {
+		if dryRun {
+			if len(result.Changes) > 0 {
+				fmt.Printf("%s Dry run complete. %d file(s) would be modified.\n",
+					color(colorGreen, "[OK]"), len(result.Changes))
+				fmt.Printf("    Run without --dry-run to apply changes.\n")
+			} else {
+				fmt.Printf("%s Dry run complete. No changes needed.\n", color(colorGreen, "[OK]"))
+			}
+		} else {
+			if len(result.Changes) > 0 {
+				fmt.Printf("%s Recipe completed successfully. %d file(s) modified.\n",
+					color(colorGreen, "[OK]"), len(result.Changes))
+			} else {
+				fmt.Printf("%s Recipe completed successfully. No changes needed.\n",
+					color(colorGreen, "[OK]"))
+			}
+		}
+	} else {
+		fmt.Printf("%s Recipe failed at step %d.\n", color(colorRed, "[FAIL]"), result.StepsRun)
+		if result.Error != nil {
+			fmt.Printf("    %s %s\n", color(colorRed, "error:"), result.Error)
+		}
+	}
 }
