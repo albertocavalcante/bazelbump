@@ -1,7 +1,7 @@
 # bazelbump Handoff
 
-**Date:** 2025-02-03
-**Status:** MVP functional, ready for CLI integration and polish
+**Date:** 2026-02-03
+**Status:** Core complete, Starlark recipe system functional, ready for Phase 1 enhancements
 
 ## What's Built
 
@@ -14,6 +14,7 @@
 | `analysis/` | ✅ Complete | Detect flag issues (removed, deprecated, changed) |
 | `transform/` | ✅ Complete | Generate and apply patches for flag issues |
 | `recipe/` | ✅ Complete | Multi-step, multi-file migration framework |
+| `recipe/starlark/` | ✅ Complete | Starlark recipe DSL with three-phase execution |
 | `internal/version/` | ✅ Complete | Bazel version parsing and comparison |
 
 ### CLI (`cmd/bazelbump/`)
@@ -21,11 +22,24 @@
 | Command | Status | Description |
 |---------|--------|-------------|
 | `analyze` | ✅ Working | Detect issues for version upgrade |
+| `apply` | ✅ Working | Apply transforms to fix issues |
 | `diff` | ✅ Working | Show flag changes between versions |
 | `flags` | ✅ Working | List flags with filters |
+| `recipe list` | ✅ Working | List available recipes |
+| `recipe show` | ✅ Working | Show recipe details |
+| `recipe run` | ✅ Working | Run a recipe (supports .star files) |
 | `version` | ✅ Working | Show version info |
-| `recipe` | ❌ Not wired | Recipe commands not in CLI yet |
-| `apply` | ❌ Not implemented | Apply transforms to fix issues |
+
+### Starlark Recipe System
+
+| Component | Status | Description |
+|-----------|--------|-------------|
+| Interpreter | ✅ Complete | Parse and execute .star recipe files |
+| Three-phase execution | ✅ Complete | Interpret → Validate → Execute |
+| Recipe discovery | ✅ Complete | Project, user, builtin sources |
+| Standard library | ✅ Complete | `@stdlib//` with rule patterns |
+| Operations | ✅ Complete | ensure_load, remove_flag, ensure_bazel_dep, etc. |
+| Load system | ✅ Complete | Relative, absolute, stdlib imports |
 
 ### Tooling
 
@@ -33,136 +47,64 @@
 |------|--------|-------------|
 | `tools/sync-flags/` | ✅ Working | Sync flag data from registry.build |
 | `tools/lint/` | ✅ Configured | golangci-lint, staticcheck |
-| `justfile` | ✅ Complete | build, test, install, dev, ci, release |
+| `justfile` | ✅ Complete | build, test, install (cross-platform), dev, ci, release |
 
 ### Documentation
 
 | Doc | Status | Location |
 |-----|--------|----------|
-| User docs | ✅ Complete | `docs/user/` (getting-started, commands, troubleshooting) |
+| User docs | ✅ Complete | `docs/user/` (getting-started, commands, recipes, authoring) |
+| Roadmap | ✅ Complete | `docs/ROADMAP.md` |
+| Design philosophy | ✅ Complete | `docs/design/standing-on-shoulders.md` |
+| Starlark spec | ✅ Complete | `docs/design/starlark-recipes-spec.md` |
+| Research | ✅ Complete | `docs/research/` (starlark-tools, extensibility) |
 | ADRs | ✅ Complete | `docs/decisions/` (7 ADRs) |
-| Milestones | ✅ Complete | `docs/milestones/` (M0-M8) |
-| Recipe design | ✅ Complete | `docs/design/recipe-system.md` |
 | README | ✅ Complete | Project overview |
 
-## What Needs to Be Done
+---
 
-### High Priority (Complete the MVP)
+## What's Next
 
-#### 1. Wire Recipe Commands to CLI
+**See [ROADMAP.md](docs/ROADMAP.md) for the full development plan.**
 
-Add recipe subcommands to `cmd/bazelbump/main.go`:
+### Phase 1: 100% Starlark Authoring (Current Focus)
 
-```bash
-bazelbump recipe list                           # List available recipes
-bazelbump recipe show <name>                    # Show recipe details
-bazelbump recipe run <name> [--dry-run]         # Run a recipe
-bazelbump recipe run <name> --step <step-id>    # Run specific step
-```
+Enable users to write fully custom recipes:
 
-**Files to modify:**
-- `cmd/bazelbump/main.go` - Add recipe command handling
+1. **File I/O Builtins** - `read_file()`, `glob()`, `list_dir()`, `file_exists()`
+2. **Regex Module** - Embed starlib's `re` module
+3. **BUILD File Parsing** - Structured access to rules and loads
+4. **Custom Functions** - User-defined scanners and transforms
 
-**Reference:**
-- `recipe/engine.go` - Engine.List(), Engine.Get(), Engine.Run()
+### Phase 2: Production Readiness
 
-#### 2. Add `apply` Command
+- Real-world testing on OSS projects
+- Built-in recipes (autoload, bzlmod migration)
+- Buildifier integration
+- Snapshot & rollback
 
-Apply transforms from analysis to fix issues:
+### Phase 3: Ecosystem Integration
 
-```bash
-bazelbump apply --to 9.0.0 [--dry-run]
-```
+- GitHub Actions
+- IDE integration (VS Code)
+- Recipe catalog
 
-**Implementation:**
-1. Run analysis to get issues
-2. Generate patches using `transform.GeneratePatches()`
-3. Apply patches using `transform.ApplyPatches()`
-
-**Files to modify:**
-- `cmd/bazelbump/main.go` - Add apply command
-
-#### 3. Test on Real Projects
-
-Test bazelbump on actual Bazel projects:
-- A project with native rules (sh_binary, cc_library, etc.)
-- A project upgrading from Bazel 8 to 9
-- Edge cases: multiple .bazelrc files, configs, etc.
-
-### Medium Priority (Polish)
-
-#### 4. Improve Load Statement Deduplication
-
-Current `recipe/engine.go` adds load statements but doesn't:
-- Merge with existing loads from the same path
-- Handle multiple rules from same repository efficiently
-
-Example improvement:
-```starlark
-# Current (adds separate loads):
-load("@rules_cc//cc:defs.bzl", "cc_binary")
-load("@rules_cc//cc:defs.bzl", "cc_library")
-
-# Better (merged):
-load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
-```
-
-#### 5. Add Buildifier Integration
-
-Use buildifier for:
-- Formatting after edits
-- Detecting native rule usage (buildifier has `--lint=warn --warnings=native-*`)
-- Canonical load statement ordering
-
-#### 6. Snapshot/Rollback System
-
-Implement safety features from M3 milestone:
-- Create snapshots before applying changes
-- Rollback if something goes wrong
-- Store in `~/.local/share/bazelbump/snapshots/`
-
-#### 7. Better Error Messages
-
-Add context to errors:
-- Which file failed
-- Which line/rule caused the issue
-- Suggested fixes
-
-### Lower Priority (Future)
-
-#### 8. Starlark API Analysis
-
-Detect deprecated Starlark APIs (not just flags):
-- `native.existing_rule()` → `native.existing_rules().get()`
-- `cfg = "host"` → `cfg = "exec"`
-- Struct providers → proper provider definitions
-
-#### 9. LLM Integration
-
-Add LLM-assisted features:
-- `bazelbump explain <flag>` - Explain what a flag does
-- `bazelbump diagnose` - Diagnose build errors
-- Complex migration suggestions
-
-#### 10. WORKSPACE to bzlmod Recipe
-
-Create recipe for migrating from WORKSPACE to MODULE.bazel:
-- Convert `http_archive` to `bazel_dep`
-- Handle overrides
-- Migrate toolchains
+---
 
 ## Key Files to Understand
 
 ### Entry Points
 
 ```
-cmd/bazelbump/main.go      # CLI entry point
-recipe/engine.go           # Recipe execution
-analysis/analysis.go       # Issue detection
-transform/transform.go     # Patch generation
+cmd/bazelbump/main.go           # CLI entry point
+recipe/starlark/interpreter.go  # Starlark DSL interpreter
+recipe/starlark/executor.go     # Three-phase execution engine
+recipe/starlark/discovery.go    # Recipe discovery
+analysis/analysis.go            # Issue detection
+transform/transform.go          # Patch generation
 ```
 
-### Data Flow
+### Data Flow: analyze
 
 ```
 1. User runs: bazelbump analyze --to 9.0.0
@@ -174,23 +116,25 @@ transform/transform.go     # Patch generation
    - Compares flags with flagdb.Diff()
    - Returns []FlagIssue
 
-4. (Future) transform.GeneratePatches() creates patches
-
-5. (Future) transform.ApplyPatches() modifies files
+4. Results displayed or output as JSON
 ```
 
-### Recipe Flow
+### Data Flow: recipe run
 
 ```
-1. User runs: bazelbump recipe run autoload-migration
+1. User runs: bazelbump recipe run autoload-migration.star
 
-2. recipe.Engine.Run() executes steps:
-   Step 1: Scan BUILD files for native rules
-   Step 2: Add bazel_dep to MODULE.bazel
-   Step 3: Add load() to BUILD files
+2. Recipe discovery finds the recipe file
 
-3. Each step can be dry-run or applied
+3. Starlark interpreter parses and executes:
+   Phase 1 (Interpret): Build operation graph
+   Phase 2 (Validate): Check all operations valid
+   Phase 3 (Execute): Apply changes or dry-run
+
+4. Results displayed with changes made
 ```
+
+---
 
 ## Testing
 
@@ -199,22 +143,43 @@ transform/transform.go     # Patch generation
 just test
 
 # Run specific package tests
-go test -v ./recipe/...
+go test -v ./recipe/starlark/...
 go test -v ./analysis/...
 
 # Build and test CLI
-just build-cli
-./bin/bazelbump analyze --to 9.0.0
-./bin/bazelbump diff --from 8.0.0 --to 9.0.0
+just install
+bazelbump analyze --to 9.0.0
+bazelbump recipe list
+bazelbump recipe run examples/recipes/cleanup-flags.star --dry-run
 ```
+
+---
+
+## Installation
+
+```bash
+# Quick setup (recommended)
+git clone https://github.com/albertocavalcante/bazelbump.git
+cd bazelbump
+just setup  # Syncs flags and installs to ~/.local/bin
+
+# Other options
+just install-gopath   # Install to $GOPATH/bin
+just install-system   # Install to /usr/local/bin (sudo)
+just install ~/bin    # Custom directory
+```
+
+---
 
 ## Dependencies
 
-**Runtime:** None (zero dependencies in go.mod)
+**Runtime:** `go.starlark.net` (Starlark interpreter)
 
 **Data:** Flag data in `data/flags/` (sync with `just sync-flags`)
 
 **Dev tools:** In `tools/lint/go.mod` (golangci-lint, staticcheck)
+
+---
 
 ## Architecture Decisions
 
@@ -222,6 +187,12 @@ Key ADRs to understand:
 - **ADR-001**: Airgap-first (no external services required)
 - **ADR-007**: No daemon, SQLite default
 - **ADR-004**: Plain Go structs (not protobuf) for simplicity
+
+Key design docs:
+- **Standing on Shoulders**: How we learned from Copybara, Orion, OpenRewrite, etc.
+- **Starlark Recipes Spec**: Three-phase execution model
+
+---
 
 ## Contact
 
