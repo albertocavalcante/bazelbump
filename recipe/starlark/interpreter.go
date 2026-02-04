@@ -57,6 +57,9 @@ type Interpreter struct {
 
 	// bcrClient is the optional BCR client for the bcr module.
 	bcrClient *bcr.Client
+
+	// execConfig holds configuration for the exec module.
+	execConfig ExecConfig
 }
 
 // loadCacheEntry holds a cached loaded module.
@@ -96,6 +99,20 @@ func WithFlagDB(db *flagdb.DB) InterpreterOption {
 func WithBCRClient(client *bcr.Client) InterpreterOption {
 	return func(i *Interpreter) {
 		i.bcrClient = client
+	}
+}
+
+// WithExecEnabled enables the exec module for running shell commands.
+// This is a security-sensitive operation and should only be enabled
+// when the user explicitly requests it (e.g., via --allow-exec flag).
+func WithExecEnabled(projectPath string) InterpreterOption {
+	return func(i *Interpreter) {
+		i.execConfig = ExecConfig{
+			Enabled:        true,
+			ProjectPath:    projectPath,
+			MaxTimeout:     5 * time.Minute,
+			DefaultTimeout: 30 * time.Second,
+		}
 	}
 }
 
@@ -190,6 +207,9 @@ func (i *Interpreter) makeBuiltins() starlark.StringDict {
 
 		// bcr module - Bazel Central Registry client
 		"bcr": makeBcrModule(i.bcrClient),
+
+		// exec module - shell command execution (requires --allow-exec)
+		"exec": makeExecModule(i.execConfig),
 
 		// =========================================================================
 		// Deprecated global builtins (backwards compatibility)

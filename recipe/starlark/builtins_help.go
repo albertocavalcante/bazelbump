@@ -112,6 +112,10 @@ func AllBuiltinDocs() []BuiltinDoc {
 		docBcrIsYanked(),
 		docBcrIsPrerelease(),
 
+		// Modules - exec
+		docExecRun(),
+		docExecWhich(),
+
 		// File I/O (DEPRECATED - use fs module)
 		docReadFile(),
 		docFileExists(),
@@ -170,7 +174,7 @@ func GetBuiltinsByCategory(category string) []BuiltinDoc {
 func BuiltinCategories() []string {
 	return []string{
 		"step", "operation",
-		"module-project", "module-version", "module-fs", "module-flags",
+		"module-project", "module-version", "module-fs", "module-flags", "module-bcr", "module-exec",
 		"fileio", "context", "version",
 		"util", "regex",
 	}
@@ -191,6 +195,10 @@ func CategoryDisplayName(category string) string {
 		return "FILESYSTEM MODULE (fs.*)"
 	case "module-flags":
 		return "FLAGS MODULE (flags.*)"
+	case "module-bcr":
+		return "BCR MODULE (bcr.*)"
+	case "module-exec":
+		return "EXEC MODULE (exec.*)"
 	case "fileio":
 		return "FILE I/O (DEPRECATED)"
 	case "context":
@@ -1768,5 +1776,84 @@ stable_versions = [v for v in versions if not bcr.is_prerelease(v)]
 if bcr.is_prerelease("1.0.0-rc1"):
     print("This is a release candidate")`,
 		SeeAlso: []string{"bcr.latest_stable", "bcr.versions"},
+	}
+}
+
+// =============================================================================
+// Exec Module (exec.*)
+// =============================================================================
+
+func docExecRun() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "exec.run",
+		Category:    "module-exec",
+		Signature:   "exec.run(command, timeout=None, capture=True, check=True, env=None, cwd=None)",
+		Description: "Execute a shell command and return the result",
+		Args: []ArgDoc{
+			{Name: "command", Type: "str", Required: true, Description: "Shell command to execute"},
+			{Name: "timeout", Type: "str", Required: false, Description: "Timeout duration (e.g., '30s', '5m'). Default: 30s, max: 5m"},
+			{Name: "capture", Type: "bool", Required: false, Description: "Capture stdout/stderr (default: True)"},
+			{Name: "check", Type: "bool", Required: false, Description: "Raise error on non-zero exit (default: True)"},
+			{Name: "env", Type: "dict", Required: false, Description: "Environment variables to set"},
+			{Name: "cwd", Type: "str", Required: false, Description: "Working directory (relative to project)"},
+		},
+		Behavior: []string{
+			"Requires --allow-exec flag to be enabled",
+			"Commands are executed via /bin/sh -c",
+			"Working directory is restricted to project directory",
+			"Returns struct with stdout, stderr, exit_code, success",
+			"With check=True (default), raises error on non-zero exit",
+			"With check=False, always returns result struct",
+		},
+		Example: `# Check if exec is available
+if not exec.enabled:
+    fail("This recipe requires --allow-exec")
+
+# Simple command
+result = exec.run("git rev-parse HEAD")
+print("Current commit:", result.stdout.strip())
+
+# Command with error handling
+result = exec.run("bazel build //...", check=False, timeout="5m")
+if not result.success:
+    warn("Build failed: " + result.stderr)
+
+# With environment and working directory
+result = exec.run(
+    "npm install",
+    cwd="frontend",
+    env={"NODE_ENV": "production"},
+)`,
+		SeeAlso: []string{"exec.which", "run_command"},
+	}
+}
+
+func docExecWhich() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "exec.which",
+		Category:    "module-exec",
+		Signature:   "exec.which(name)",
+		Description: "Find the path to an executable",
+		Args: []ArgDoc{
+			{Name: "name", Type: "str", Required: true, Description: "Command name to find"},
+		},
+		Behavior: []string{
+			"Requires --allow-exec flag to be enabled",
+			"Returns absolute path to the command if found",
+			"Returns empty string if command not found",
+			"Searches PATH environment variable",
+		},
+		Example: `# Check for required tools
+bazel_path = exec.which("bazel")
+if not bazel_path:
+    fail("bazel not found in PATH")
+
+# Check for optional tool
+buildifier = exec.which("buildifier")
+if buildifier:
+    exec.run("buildifier -mode=fix .")
+else:
+    warn("buildifier not found, skipping format")`,
+		SeeAlso: []string{"exec.run"},
 	}
 }

@@ -1,206 +1,155 @@
-# bazelbump Handoff
+# Handoff: Starlark API Architecture Implementation
 
-**Date:** 2026-02-03
-**Status:** Phase 1 complete, entering Phase 2 (production readiness)
+## What Was Done
 
-## What's Built
+### Commits (bazelbump)
+1. `c38c698` - feat(starlark): add namespaced module API for builtins
+2. `fd8dee1` - docs: add module API documentation to recipe reference
+3. `9ee9ff9` - feat(starlark): add bcr module for Bazel Central Registry queries
+4. `628ece6` - feat(starlark/bcr): add latest_stable and is_prerelease functions
+5. `d96fad0` - feat(starlark): add exec module for shell command execution
 
-### Core Packages
+### New Files Created (bazelbump)
+```
+recipe/starlark/modules.go           # Module infrastructure (makeModule, deprecation helpers)
+recipe/starlark/project_module.go    # project.* module
+recipe/starlark/version_module.go    # version.* module
+recipe/starlark/fs_module.go         # fs.* module
+recipe/starlark/flagdb_builtins.go   # flags.* module
+recipe/starlark/bcr_module.go        # bcr.* module
+recipe/starlark/bcr_module_test.go   # bcr module tests
+recipe/starlark/exec_module.go       # exec.* module (NEW)
+recipe/starlark/exec_module_test.go  # exec module tests (NEW)
+recipe/starlark/modules_test.go      # Tests for all modules
+```
 
-| Package | Status | Description |
-|---------|--------|-------------|
-| `flagdb/` | ✅ Complete | Load, query, diff Bazel flags across 93 versions |
-| `bazelrc/` | ✅ Complete | Parse .bazelrc files with config/inheritance support |
-| `analysis/` | ✅ Complete | Detect flag issues (removed, deprecated, changed) |
-| `transform/` | ✅ Complete | Generate and apply patches for flag issues |
-| `recipe/` | ✅ Complete | Multi-step, multi-file migration framework |
-| `recipe/starlark/` | ✅ Complete | Starlark recipe DSL with three-phase execution |
-| `pkg/track/` | ✅ Complete | Git-aware file tracking for undo/rollback |
-| `internal/version/` | ✅ Complete | Bazel version parsing and comparison |
+### Modified Files (bazelbump)
+```
+recipe/starlark/interpreter.go       # Register modules, add WithFlagDB/WithBCRClient/WithExecEnabled options
+recipe/starlark/builtins_help.go     # Add module documentation
+docs/user/recipe-reference.md        # Full API documentation
+go.mod / go.sum                      # Added go-bcr dependency
+```
 
-### CLI (`cmd/bazelbump/`)
+### API Implemented (bazelbump)
 
-| Command | Status | Description |
-|---------|--------|-------------|
-| `analyze` | ✅ Working | Detect issues for version upgrade |
-| `apply` | ✅ Working | Apply transforms to fix issues |
-| `diff` | ✅ Working | Show flag changes between versions |
-| `flags` | ✅ Working | List flags with filters |
-| `recipe list` | ✅ Working | List available recipes |
-| `recipe show` | ✅ Working | Show recipe details |
-| `recipe run` | ✅ Working | Run a recipe (supports .star files) |
-| `status` | ✅ Working | Show pending/tracked changes |
-| `undo` | ✅ Working | Revert last recipe changes |
-| `snapshot list` | ✅ Working | List available snapshots |
-| `snapshot delete` | ✅ Working | Delete a snapshot |
-| `version` | ✅ Working | Show version info |
-
-### Starlark Recipe System
-
-| Component | Status | Description |
-|-----------|--------|-------------|
-| Interpreter | ✅ Complete | Parse and execute .star recipe files |
-| Three-phase execution | ✅ Complete | Interpret → Validate → Execute |
-| Recipe discovery | ✅ Complete | Project, user, builtin sources |
-| Standard library | ✅ Complete | `@stdlib//` with rule patterns |
-| Operations | ✅ Complete | ensure_load, remove_flag, ensure_bazel_dep, run_command, etc. |
-| Load system | ✅ Complete | Relative, absolute, stdlib imports |
-
-### Tooling
-
-| Tool | Status | Description |
-|------|--------|-------------|
-| `tools/sync-flags/` | ✅ Working | Sync flag data from registry.build |
-| `tools/lint/` | ✅ Configured | golangci-lint, staticcheck |
-| `justfile` | ✅ Complete | build, test, install (cross-platform), dev, ci, release |
-
-### Documentation
-
-| Doc | Status | Location |
-|-----|--------|----------|
-| User docs | ✅ Complete | `docs/user/` (getting-started, commands, recipes, authoring) |
-| Roadmap | ✅ Complete | `docs/ROADMAP.md` |
-| Design philosophy | ✅ Complete | `docs/design/standing-on-shoulders.md` |
-| Starlark spec | ✅ Complete | `docs/design/starlark-recipes-spec.md` |
-| Research | ✅ Complete | `docs/research/` (starlark-tools, extensibility) |
-| ADRs | ✅ Complete | `docs/decisions/` (7 ADRs) |
-| README | ✅ Complete | Project overview |
+| Module | Functions |
+|--------|-----------|
+| `project` | `context()`, `deps()`, `compatibility()` |
+| `version` | `parse()`, `compare()`, `matches()`, `at_least()`, `in_range()` |
+| `fs` | `read()`, `exists()`, `glob()`, `list_dir()`, `parse_build()` |
+| `flags` | `exists()`, `get()`, `diff()`, `incompatible()`, `deprecated()` |
+| `bcr` | `metadata()`, `source()`, `latest()`, `latest_stable()`, `versions()`, `exists()`, `version_exists()`, `is_yanked()`, `is_prerelease()` |
+| `exec` | `run()`, `which()`, `enabled` |
 
 ---
 
-## What's Next
+## go-bcr Library Created
 
-**See [ROADMAP.md](docs/ROADMAP.md) for the full development plan.**
+**Repo:** https://github.com/albertocavalcante/go-bcr
 
-### Phase 1: 100% Starlark Authoring ✅ COMPLETE
+Lightweight, zero-dependency Go client for the Bazel Central Registry.
 
-Users can now write fully custom recipes:
+### Files
+```
+go-bcr/
+├── go.mod              # github.com/albertocavalcante/go-bcr, Go 1.25
+├── doc.go              # Package documentation
+├── client.go           # Client, New, Options, methods
+├── types.go            # Metadata, Source, Maintainer
+├── errors.go           # ErrNotFound, NotFoundError, RequestError
+├── client_test.go      # Unit tests
+├── example_test.go     # Godoc examples
+├── integration_test.go # Live BCR tests (go test -tags=integration)
+├── LICENSE             # MIT
+├── README.md           # Badges, docs
+└── .github/workflows/ci.yml
+```
 
-- **File I/O Builtins** - `read_file()`, `glob()`, `list_dir()`, `file_exists()`
-- **Regex Module** - starlib's `re` module embedded
-- **BUILD File Parsing** - `parse_build_file()` for structured access
-- **Custom Functions** - User-defined scanners and transforms with `impl=` and `operations=`
-- **run_command** - Execute shell commands (formatters, linters, external tools)
-- **Authoring UX** - `recipe validate`, `recipe builtins`, `recipe init`
-
-### Phase 2: Production Readiness (Current Focus)
-
-- Real-world testing on OSS projects
-- ✅ **Git-aware undo system** - `pkg/track/` with `bazelbump undo`, `bazelbump status`, `bazelbump snapshot list/delete`
-- ✅ **Autoload migration recipe** - `examples/recipes/autoload-migration.star` for Bazel 9 native rule load statements
-- **Formatter recipes added**: `format-buildifier.star`, `format-skyfmt.star`, `format-compare.star`
-
-### Phase 3: Ecosystem Integration
-
-- GitHub Actions
-- IDE integration (VS Code)
-- Recipe catalog
+### API
+- `client.Metadata(ctx, module)` → `*Metadata`
+- `client.Source(ctx, module, version)` → `*Source`
+- `client.ModuleFile(ctx, module, version)` → `[]byte`
+- `client.Latest(ctx, module)` → `string`
+- `client.LatestStable(ctx, module)` → `string`
+- `client.Versions(ctx, module)` → `iter.Seq2[string, error]`
+- `client.Exists(ctx, module)` → `bool`
+- `client.VersionExists(ctx, module, version)` → `bool`
+- `bcr.IsPrerelease(version)` → `bool`
 
 ---
 
-## Key Files to Understand
+## exec Module
 
-### Entry Points
+The exec module provides secure shell command execution from recipes.
 
-```
-cmd/bazelbump/main.go           # CLI entry point
-recipe/starlark/interpreter.go  # Starlark DSL interpreter
-recipe/starlark/executor.go     # Three-phase execution engine
-recipe/starlark/discovery.go    # Recipe discovery
-analysis/analysis.go            # Issue detection
-transform/transform.go          # Patch generation
-```
+### Security Model
+- **Disabled by default** - requires `--allow-exec` flag
+- Commands execute in project directory sandbox
+- `cwd` parameter restricted to subdirectories of project
+- Timeout limits enforced (default: 30s, max: 5m)
 
-### Data Flow: analyze
+### API
+```starlark
+# Check if exec is available
+exec.enabled  # bool
 
-```
-1. User runs: bazelbump analyze --to 9.0.0
+# Run a command
+result = exec.run(
+    "git rev-parse HEAD",
+    timeout = "30s",     # optional, default 30s
+    capture = True,      # optional, capture stdout/stderr
+    check = True,        # optional, raise on non-zero exit
+    env = {"KEY": "val"}, # optional environment
+    cwd = "subdir",      # optional working directory
+)
+# result.stdout, result.stderr, result.exit_code, result.success
 
-2. flagdb.Load() loads flag data from data/flags/
-
-3. analysis.Analyzer scans .bazelrc files:
-   - Parses with bazelrc.ParseFile()
-   - Compares flags with flagdb.Diff()
-   - Returns []FlagIssue
-
-4. Results displayed or output as JSON
-```
-
-### Data Flow: recipe run
-
-```
-1. User runs: bazelbump recipe run autoload-migration.star
-
-2. Recipe discovery finds the recipe file
-
-3. Starlark interpreter parses and executes:
-   Phase 1 (Interpret): Build operation graph
-   Phase 2 (Validate): Check all operations valid
-   Phase 3 (Execute): Apply changes or dry-run
-
-4. Results displayed with changes made
+# Find command path
+path = exec.which("bazel")  # Returns "" if not found
 ```
 
 ---
 
 ## Testing
 
+All tests pass:
 ```bash
-# Run all tests
-just test
-
-# Run specific package tests
-go test -v ./recipe/starlark/...
-go test -v ./analysis/...
-
-# Build and test CLI
-just install
-bazelbump analyze --to 9.0.0
-bazelbump recipe list
-bazelbump recipe run examples/recipes/cleanup-flags.star --dry-run
+go test ./recipe/starlark/...  # bazelbump - All pass
+go test ./...                   # go-bcr - All pass
+go test -tags=integration ./... # go-bcr integration - All pass
 ```
 
 ---
 
-## Installation
+## Usage Examples
 
-```bash
-# Quick setup (recommended)
-git clone https://github.com/albertocavalcante/bazelbump.git
-cd bazelbump
-just setup  # Syncs flags and installs to ~/.local/bin
+### BCR Module
+```starlark
+# Get latest stable version
+latest = bcr.latest_stable("rules_go")
 
-# Other options
-just install-gopath   # Install to $GOPATH/bin
-just install-system   # Install to /usr/local/bin (sudo)
-just install ~/bin    # Custom directory
+# Check if prerelease
+if bcr.is_prerelease(version):
+    warn("Using prerelease version")
+
+# Update dependency
+update_bazel_dep(name = "rules_go", version = bcr.latest_stable("rules_go"))
 ```
 
----
+### Exec Module
+```starlark
+# Guard for exec availability
+if not exec.enabled:
+    fail("This recipe requires --allow-exec")
 
-## Dependencies
+# Get git info
+result = exec.run("git rev-parse --short HEAD")
+commit = result.stdout.strip()
 
-**Runtime:** `go.starlark.net` (Starlark interpreter)
-
-**Data:** Flag data in `data/flags/` (sync with `just sync-flags`)
-
-**Dev tools:** In `tools/lint/go.mod` (golangci-lint, staticcheck)
-
----
-
-## Architecture Decisions
-
-Key ADRs to understand:
-- **ADR-001**: Airgap-first (no external services required)
-- **ADR-007**: No daemon, SQLite default
-- **ADR-004**: Plain Go structs (not protobuf) for simplicity
-
-Key design docs:
-- **Standing on Shoulders**: How we learned from Copybara, Orion, OpenRewrite, etc.
-- **Starlark Recipes Spec**: Three-phase execution model
-
----
-
-## Contact
-
-Repository: https://github.com/albertocavalcante/bazelbump
+# Check for required tools
+if not exec.which("buildifier"):
+    warn("buildifier not found, skipping format")
+else:
+    exec.run("buildifier -mode=fix .")
+```
