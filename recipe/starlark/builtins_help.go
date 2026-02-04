@@ -82,6 +82,18 @@ func AllBuiltinDocs() []BuiltinDoc {
 		docListDir(),
 		docParseBuildFile(),
 
+		// Project Context
+		docGetProjectContext(),
+		docGetBazelDeps(),
+		docGetBazelCompatibility(),
+
+		// Version Utilities
+		docVersionMatches(),
+		docVersionCompare(),
+		docParseVersion(),
+		docVersionAtLeast(),
+		docVersionInRange(),
+
 		// Utilities
 		docFail(),
 		docWarn(),
@@ -119,7 +131,7 @@ func GetBuiltinsByCategory(category string) []BuiltinDoc {
 
 // BuiltinCategories returns all available categories in display order.
 func BuiltinCategories() []string {
-	return []string{"step", "operation", "fileio", "util", "regex"}
+	return []string{"step", "operation", "fileio", "context", "version", "util", "regex"}
 }
 
 // CategoryDisplayName returns the display name for a category.
@@ -131,6 +143,10 @@ func CategoryDisplayName(category string) string {
 		return "OPERATIONS"
 	case "fileio":
 		return "FILE I/O"
+	case "context":
+		return "PROJECT CONTEXT"
+	case "version":
+		return "VERSION UTILITIES"
 	case "util":
 		return "UTILITIES"
 	case "regex":
@@ -862,5 +878,213 @@ func docReSplit() BuiltinDoc {
 		Example: `parts = re.split(r"\\s*,\\s*", "a, b,  c")
 # parts = ["a", "b", "c"]`,
 		SeeAlso: []string{"re.findall", "re.sub"},
+	}
+}
+
+// =============================================================================
+// Project Context Builtins
+// =============================================================================
+
+func docGetProjectContext() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "get_project_context",
+		Category:    "context",
+		Signature:   "get_project_context()",
+		Description: "Get project context information (memoized per run)",
+		Args:        []ArgDoc{},
+		Behavior: []string{
+			"Detects project root, Bazel version, and module configuration",
+			"Results are cached for the duration of the recipe execution",
+			"Requires project path to be set (automatic when running recipes)",
+		},
+		Example: `ctx = get_project_context()
+if ctx.use_bzlmod:
+    print("Using bzlmod at", ctx.root)
+if ctx.bazel_version:
+    print("Bazel version:", ctx.bazel_version)`,
+		SeeAlso: []string{"get_bazel_deps", "get_bazel_compatibility", "version_at_least"},
+	}
+}
+
+func docGetBazelDeps() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "get_bazel_deps",
+		Category:    "context",
+		Signature:   "get_bazel_deps()",
+		Description: "Get list of bazel_dep() entries from MODULE.bazel",
+		Args:        []ArgDoc{},
+		Behavior: []string{
+			"Parses MODULE.bazel and extracts all bazel_dep entries",
+			"Returns empty list if MODULE.bazel doesn't exist",
+			"Each entry is a dict with name, version, repo_name, dev_dependency",
+		},
+		Example: `deps = get_bazel_deps()
+for dep in deps:
+    print(dep["name"], "at version", dep["version"])
+    if dep["dev_dependency"]:
+        print("  (dev dependency)")`,
+		SeeAlso: []string{"get_project_context", "ensure_bazel_dep"},
+	}
+}
+
+func docGetBazelCompatibility() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "get_bazel_compatibility",
+		Category:    "context",
+		Signature:   "get_bazel_compatibility()",
+		Description: "Get bazel_compatibility constraints from MODULE.bazel",
+		Args:        []ArgDoc{},
+		Behavior: []string{
+			"Extracts the bazel_compatibility attribute from module()",
+			"Returns list of constraint strings (BCR format)",
+			"Returns empty list if no compatibility constraints defined",
+		},
+		Example: `compat = get_bazel_compatibility()
+# compat might be [">=6.4.0", "<=9.0.0", "-7.1.0"]
+ctx = get_project_context()
+if ctx.bazel_version and not version_matches(ctx.bazel_version, compat):
+    fail("Project Bazel version doesn't match compatibility constraints")`,
+		SeeAlso: []string{"get_project_context", "version_matches"},
+	}
+}
+
+// =============================================================================
+// Version Utility Builtins
+// =============================================================================
+
+func docVersionMatches() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "version_matches",
+		Category:    "version",
+		Signature:   "version_matches(version, constraints)",
+		Description: "Check if version satisfies BCR-style constraints",
+		Args: []ArgDoc{
+			{Name: "version", Type: "str", Required: true, Description: "Version string to check (e.g., \"7.7.1\")"},
+			{Name: "constraints", Type: "list[str]", Required: true, Description: "List of constraint strings"},
+		},
+		Behavior: []string{
+			"Supports BCR constraint operators: >=, <=, >, <, ==, !=",
+			"Supports exclusion with - prefix (e.g., \"-7.1.0\")",
+			"All constraints must match for the result to be True",
+			"Empty constraints list returns True (matches everything)",
+		},
+		Example: `# Check against compatibility constraints
+version_matches("7.7.1", [">=6.4.0", "<=9.0.0"])  # True
+version_matches("7.1.0", [">=6.4.0", "-7.1.0"])   # False (excluded)
+version_matches("5.0.0", [">=6.4.0"])             # False`,
+		SeeAlso: []string{"version_compare", "version_at_least", "get_bazel_compatibility"},
+	}
+}
+
+func docVersionCompare() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "version_compare",
+		Category:    "version",
+		Signature:   "version_compare(v1, v2)",
+		Description: "Compare two version strings",
+		Args: []ArgDoc{
+			{Name: "v1", Type: "str", Required: true, Description: "First version string"},
+			{Name: "v2", Type: "str", Required: true, Description: "Second version string"},
+		},
+		Behavior: []string{
+			"Returns -1 if v1 < v2",
+			"Returns 0 if v1 == v2",
+			"Returns 1 if v1 > v2",
+			"Handles prerelease versions (e.g., 7.0.0-rc1 < 7.0.0)",
+		},
+		Example: `version_compare("7.0.0", "8.0.0")  # -1
+version_compare("8.0.0", "7.0.0")  # 1
+version_compare("7.0.0", "7.0.0")  # 0
+
+# Sort versions
+versions = ["8.0.0", "7.2.0", "9.0.0"]
+sorted_versions = sorted(versions, cmp=lambda a, b: version_compare(a, b))`,
+		SeeAlso: []string{"version_matches", "version_at_least", "parse_version"},
+	}
+}
+
+func docParseVersion() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "parse_version",
+		Category:    "version",
+		Signature:   "parse_version(s)",
+		Description: "Parse version string into components",
+		Args: []ArgDoc{
+			{Name: "s", Type: "str", Required: true, Description: "Version string to parse"},
+		},
+		Behavior: []string{
+			"Returns struct with major, minor, patch, prerelease, and string fields",
+			"Supports semver format with optional prerelease suffix",
+			"Raises error for invalid version strings",
+		},
+		Example: `v = parse_version("7.0.0-rc1")
+v.major       # 7
+v.minor       # 0
+v.patch       # 0
+v.prerelease  # "rc1"
+v.string      # "7.0.0-rc1"
+
+# Check major version
+if parse_version(ctx.bazel_version).major >= 8:
+    print("Running on Bazel 8+")`,
+		SeeAlso: []string{"version_compare", "version_matches"},
+	}
+}
+
+func docVersionAtLeast() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "version_at_least",
+		Category:    "version",
+		Signature:   "version_at_least(version, minimum)",
+		Description: "Check if version >= minimum",
+		Args: []ArgDoc{
+			{Name: "version", Type: "str", Required: true, Description: "Version string to check"},
+			{Name: "minimum", Type: "str", Required: true, Description: "Minimum required version"},
+		},
+		Behavior: []string{
+			"Returns True if version >= minimum",
+			"Equivalent to version_compare(version, minimum) >= 0",
+			"Useful for prerequisite checks",
+		},
+		Example: `ctx = get_project_context()
+if not version_at_least(ctx.bazel_version, "8.0.0"):
+    fail("This recipe requires Bazel 8.0.0 or later")
+
+# Use in recipe definition
+recipe(
+    name = "my-migration",
+    min_bazel_version = "8.0.0",  # Also validates automatically
+    ...
+)`,
+		SeeAlso: []string{"version_in_range", "version_compare", "version_matches"},
+	}
+}
+
+func docVersionInRange() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "version_in_range",
+		Category:    "version",
+		Signature:   "version_in_range(version, min, max)",
+		Description: "Check if min <= version <= max",
+		Args: []ArgDoc{
+			{Name: "version", Type: "str", Required: true, Description: "Version string to check"},
+			{Name: "min", Type: "str", Required: true, Description: "Minimum version (inclusive)"},
+			{Name: "max", Type: "str", Required: true, Description: "Maximum version (inclusive)"},
+		},
+		Behavior: []string{
+			"Returns True if min <= version <= max",
+			"Both min and max are inclusive bounds",
+			"Useful for checking compatibility ranges",
+		},
+		Example: `ctx = get_project_context()
+
+# Check if running on Bazel 7.x
+if version_in_range(ctx.bazel_version, "7.0.0", "7.99.99"):
+    print("Running on Bazel 7.x")
+
+# Check supported version range
+if not version_in_range(ctx.bazel_version, "7.0.0", "9.0.0"):
+    fail("This recipe only supports Bazel 7.x to 9.x")`,
+		SeeAlso: []string{"version_at_least", "version_compare", "version_matches"},
 	}
 }

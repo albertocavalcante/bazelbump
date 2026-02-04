@@ -598,6 +598,279 @@ delete_file("*.bak")  # Glob pattern
 
 ---
 
+## Project Context Functions
+
+These functions provide information about the project being migrated.
+
+### get_project_context()
+
+Get project context information (memoized per run).
+
+```starlark
+get_project_context() -> struct
+```
+
+**Returns:** A struct with these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `root` | string | Project root directory |
+| `bazel_version` | string | Bazel version from .bazelversion (empty if not found) |
+| `use_bzlmod` | bool | True if MODULE.bazel exists |
+| `use_workspace` | bool | True if WORKSPACE exists |
+| `module_name` | string | Module name from MODULE.bazel |
+| `module_version` | string | Module version from MODULE.bazel |
+
+**Example:**
+
+```starlark
+ctx = get_project_context()
+if ctx.use_bzlmod:
+    print("Using bzlmod at", ctx.root)
+if ctx.bazel_version:
+    print("Bazel version:", ctx.bazel_version)
+```
+
+---
+
+### get_bazel_deps()
+
+Get list of bazel_dep() entries from MODULE.bazel.
+
+```starlark
+get_bazel_deps() -> list[dict]
+```
+
+**Returns:** List of dicts, each with:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `name` | string | Module name |
+| `version` | string | Module version |
+| `repo_name` | string | Optional repo_name override (empty if not set) |
+| `dev_dependency` | bool | True if this is a dev dependency |
+
+**Example:**
+
+```starlark
+deps = get_bazel_deps()
+for dep in deps:
+    print(dep["name"], "at version", dep["version"])
+    if dep["dev_dependency"]:
+        print("  (dev dependency)")
+```
+
+---
+
+### get_bazel_compatibility()
+
+Get bazel_compatibility constraints from MODULE.bazel.
+
+```starlark
+get_bazel_compatibility() -> list[string]
+```
+
+**Returns:** List of constraint strings (BCR format), e.g., `[">=6.4.0", "<=9.0.0", "-7.1.0"]`
+
+**Example:**
+
+```starlark
+compat = get_bazel_compatibility()
+ctx = get_project_context()
+if ctx.bazel_version and not version_matches(ctx.bazel_version, compat):
+    fail("Project Bazel version doesn't match compatibility constraints")
+```
+
+---
+
+## Version Utility Functions
+
+These functions help with version comparisons and constraint checking.
+
+### version_matches()
+
+Check if a version satisfies BCR-style constraints.
+
+```starlark
+version_matches(
+    version,                 # string, required
+    constraints,             # list[string], required
+) -> bool
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `version` | string | Yes | Version string to check (e.g., "7.7.1") |
+| `constraints` | list[string] | Yes | List of constraint strings |
+
+**Constraint operators:**
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `>=` | Greater than or equal | `>=6.4.0` |
+| `<=` | Less than or equal | `<=9.0.0` |
+| `>` | Greater than | `>7.0.0` |
+| `<` | Less than | `<8.0.0` |
+| `==` | Exactly equal | `==7.0.0` |
+| `!=` | Not equal | `!=7.1.0` |
+| `-` | Exclude version | `-7.1.0` |
+
+**Example:**
+
+```starlark
+version_matches("7.7.1", [">=6.4.0", "<=9.0.0"])  # True
+version_matches("7.1.0", [">=6.4.0", "-7.1.0"])   # False (excluded)
+version_matches("5.0.0", [">=6.4.0"])             # False
+```
+
+---
+
+### version_compare()
+
+Compare two version strings.
+
+```starlark
+version_compare(
+    v1,                      # string, required
+    v2,                      # string, required
+) -> int
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `v1` | string | Yes | First version string |
+| `v2` | string | Yes | Second version string |
+
+**Returns:**
+
+| Value | Meaning |
+|-------|---------|
+| `-1` | v1 < v2 |
+| `0` | v1 == v2 |
+| `1` | v1 > v2 |
+
+**Example:**
+
+```starlark
+version_compare("7.0.0", "8.0.0")  # -1
+version_compare("8.0.0", "7.0.0")  # 1
+version_compare("7.0.0", "7.0.0")  # 0
+```
+
+---
+
+### parse_version()
+
+Parse a version string into its components.
+
+```starlark
+parse_version(
+    s,                       # string, required
+) -> struct
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `s` | string | Yes | Version string to parse |
+
+**Returns:** A struct with these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `major` | int | Major version number |
+| `minor` | int | Minor version number |
+| `patch` | int | Patch version number |
+| `prerelease` | string | Prerelease suffix (empty if stable) |
+| `string` | string | Original version string |
+
+**Example:**
+
+```starlark
+v = parse_version("7.0.0-rc1")
+v.major       # 7
+v.minor       # 0
+v.patch       # 0
+v.prerelease  # "rc1"
+v.string      # "7.0.0-rc1"
+
+# Check major version
+ctx = get_project_context()
+if parse_version(ctx.bazel_version).major >= 8:
+    print("Running on Bazel 8+")
+```
+
+---
+
+### version_at_least()
+
+Check if version >= minimum.
+
+```starlark
+version_at_least(
+    version,                 # string, required
+    minimum,                 # string, required
+) -> bool
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `version` | string | Yes | Version string to check |
+| `minimum` | string | Yes | Minimum required version |
+
+**Example:**
+
+```starlark
+ctx = get_project_context()
+if not version_at_least(ctx.bazel_version, "8.0.0"):
+    fail("This recipe requires Bazel 8.0.0 or later")
+```
+
+---
+
+### version_in_range()
+
+Check if min <= version <= max.
+
+```starlark
+version_in_range(
+    version,                 # string, required
+    min,                     # string, required
+    max,                     # string, required
+) -> bool
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `version` | string | Yes | Version string to check |
+| `min` | string | Yes | Minimum version (inclusive) |
+| `max` | string | Yes | Maximum version (inclusive) |
+
+**Example:**
+
+```starlark
+ctx = get_project_context()
+
+# Check if running on Bazel 7.x
+if version_in_range(ctx.bazel_version, "7.0.0", "7.99.99"):
+    print("Running on Bazel 7.x")
+
+# Check supported version range
+if not version_in_range(ctx.bazel_version, "7.0.0", "9.0.0"):
+    fail("This recipe only supports Bazel 7.x to 9.x")
+```
+
+---
+
 ## Error Handling Functions
 
 ### fail()
