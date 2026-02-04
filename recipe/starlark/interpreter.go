@@ -116,6 +116,26 @@ func WithExecEnabled(projectPath string) InterpreterOption {
 	}
 }
 
+// WithCapabilities returns interpreter options that enable modules based on the
+// granted capabilities. This is used to configure the interpreter after the user
+// has approved the required capabilities.
+func WithCapabilities(projectPath string, config *CapabilityConfig) []InterpreterOption {
+	var opts []InterpreterOption
+
+	// Always set project path
+	opts = append(opts, WithProjectPath(projectPath))
+
+	// Enable exec if granted
+	if config != nil && config.IsGranted(CapabilityExec) {
+		opts = append(opts, WithExecEnabled(projectPath))
+	}
+
+	// Note: BCR capability requires the BCR client to be passed separately
+	// via WithBCRClient since it needs an actual client instance.
+
+	return opts
+}
+
 // NewInterpreter creates a new Starlark interpreter with the recipe DSL builtins.
 func NewInterpreter(opts ...InterpreterOption) *Interpreter {
 	interp := &Interpreter{
@@ -446,6 +466,7 @@ func (i *Interpreter) builtinRecipe(thread *starlark.Thread, fn *starlark.Builti
 		description     string
 		minBazelVersion string
 		maxBazelVersion string
+		requires        *starlark.List
 		steps           *starlark.List
 		onFailure       string = "rollback"
 	)
@@ -456,6 +477,7 @@ func (i *Interpreter) builtinRecipe(thread *starlark.Thread, fn *starlark.Builti
 		"description?", &description,
 		"min_bazel_version?", &minBazelVersion,
 		"max_bazel_version?", &maxBazelVersion,
+		"requires?", &requires,
 		"steps", &steps,
 		"on_failure?", &onFailure,
 	); err != nil {
@@ -475,12 +497,30 @@ func (i *Interpreter) builtinRecipe(thread *starlark.Thread, fn *starlark.Builti
 		return nil, fmt.Errorf("invalid on_failure value %q: must be 'rollback', 'stop', or 'continue'", onFailure)
 	}
 
+	// Parse requires list
+	var requiredCaps []Capability
+	if requires != nil {
+		iter := requires.Iterate()
+		defer iter.Done()
+		var capVal starlark.Value
+		for iter.Next(&capVal) {
+			capStr, ok := starlark.AsString(capVal)
+			if !ok {
+				return nil, fmt.Errorf("requires must be a list of strings, got %s", capVal.Type())
+			}
+			if !IsValidCapability(capStr) {
+				return nil, fmt.Errorf("unknown capability %q in requires: valid capabilities are: fs, bcr, exec", capStr)
+			}
+			requiredCaps = append(requiredCaps, Capability(capStr))
+		}
+	}
+
 	// Convert steps
 	var recipeSteps []Step
-	iter := steps.Iterate()
-	defer iter.Done()
+	stepsIter := steps.Iterate()
+	defer stepsIter.Done()
 	var stepVal starlark.Value
-	for iter.Next(&stepVal) {
+	for stepsIter.Next(&stepVal) {
 		// Handle scan results (which are also steps)
 		if scanResult, ok := stepVal.(*scanResultValue); ok {
 			recipeSteps = append(recipeSteps, scanResult.step)
@@ -500,6 +540,7 @@ func (i *Interpreter) builtinRecipe(thread *starlark.Thread, fn *starlark.Builti
 		Description:     description,
 		MinBazelVersion: minBazelVersion,
 		MaxBazelVersion: maxBazelVersion,
+		Requires:        requiredCaps,
 		Steps:           recipeSteps,
 		OnFailure:       failureMode,
 	}

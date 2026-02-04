@@ -222,7 +222,7 @@ func docRecipe() BuiltinDoc {
 	return BuiltinDoc{
 		Name:        "recipe",
 		Category:    "step",
-		Signature:   "recipe(name, version, steps, description=None, min_bazel_version=None, max_bazel_version=None, on_failure=\"rollback\")",
+		Signature:   "recipe(name, version, steps, description=None, min_bazel_version=None, max_bazel_version=None, requires=None, on_failure=\"rollback\")",
 		Description: "Define a migration recipe",
 		Args: []ArgDoc{
 			{Name: "name", Type: "str", Required: true, Description: "Unique identifier for the recipe"},
@@ -231,18 +231,38 @@ func docRecipe() BuiltinDoc {
 			{Name: "description", Type: "str", Required: false, Description: "Human-readable description"},
 			{Name: "min_bazel_version", Type: "str", Required: false, Description: "Minimum Bazel version"},
 			{Name: "max_bazel_version", Type: "str", Required: false, Description: "Maximum Bazel version"},
+			{Name: "requires", Type: "list", Required: false, Description: "Capabilities required: \"exec\", \"bcr\" (default: none)"},
 			{Name: "on_failure", Type: "str", Required: false, Description: "Failure mode: \"rollback\", \"stop\", or \"continue\""},
 		},
 		Behavior: []string{
 			"Must be called exactly once per recipe file",
 			"Steps are executed in order, respecting depends_on",
 			"on_failure controls behavior when a step fails",
+			"requires declares capabilities needed - user must approve before execution",
+			"Available capabilities: \"fs\" (default), \"bcr\" (network), \"exec\" (shell commands)",
 		},
-		Example: `recipe(
+		Example: `# Basic recipe (fs capability is granted by default)
+recipe(
     name = "my-migration",
     version = "1.0.0",
     description = "Migrate native rules to rules_cc",
     steps = [detect, apply_loads, verify_build],
+)
+
+# Recipe that needs shell execution
+recipe(
+    name = "format-build",
+    version = "1.0.0",
+    requires = ["exec"],  # User must approve with --approve
+    steps = [format_step],
+)
+
+# Recipe that queries BCR
+recipe(
+    name = "update-deps",
+    version = "1.0.0",
+    requires = ["bcr"],  # Network access for registry queries
+    steps = [update_step],
 )`,
 		SeeAlso: []string{"scan", "edit", "verify"},
 	}

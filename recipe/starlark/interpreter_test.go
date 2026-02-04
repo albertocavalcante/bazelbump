@@ -1211,3 +1211,95 @@ func TestInterpreter_Load_IntegrationWithHelperFunctions(t *testing.T) {
 		t.Errorf("expected dep version '0.1.1', got %q", depOp.Version)
 	}
 }
+
+func TestInterpreter_LoadString_Requires(t *testing.T) {
+	t.Run("recipe with exec capability", func(t *testing.T) {
+		interp := NewInterpreter()
+
+		content := `
+recipe(
+    name = "exec-recipe",
+    version = "1.0.0",
+    requires = ["exec"],
+    steps = [
+        edit(id = "dummy", operations = []),
+    ],
+)
+`
+		recipe, err := interp.LoadString("test.star", content)
+		if err != nil {
+			t.Fatalf("LoadString failed: %v", err)
+		}
+
+		if len(recipe.Requires) != 1 {
+			t.Errorf("expected 1 required capability, got %d", len(recipe.Requires))
+		}
+		if recipe.Requires[0] != CapabilityExec {
+			t.Errorf("expected CapabilityExec, got %v", recipe.Requires[0])
+		}
+	})
+
+	t.Run("recipe with multiple capabilities", func(t *testing.T) {
+		interp := NewInterpreter()
+
+		content := `
+recipe(
+    name = "multi-recipe",
+    version = "1.0.0",
+    requires = ["exec", "bcr"],
+    steps = [
+        edit(id = "dummy", operations = []),
+    ],
+)
+`
+		recipe, err := interp.LoadString("test.star", content)
+		if err != nil {
+			t.Fatalf("LoadString failed: %v", err)
+		}
+
+		if len(recipe.Requires) != 2 {
+			t.Errorf("expected 2 required capabilities, got %d", len(recipe.Requires))
+		}
+	})
+
+	t.Run("recipe without requires", func(t *testing.T) {
+		interp := NewInterpreter()
+
+		content := `
+recipe(
+    name = "no-requires",
+    version = "1.0.0",
+    steps = [
+        edit(id = "dummy", operations = []),
+    ],
+)
+`
+		recipe, err := interp.LoadString("test.star", content)
+		if err != nil {
+			t.Fatalf("LoadString failed: %v", err)
+		}
+
+		if len(recipe.Requires) != 0 {
+			t.Errorf("expected 0 required capabilities, got %d", len(recipe.Requires))
+		}
+	})
+
+	t.Run("recipe with invalid capability", func(t *testing.T) {
+		interp := NewInterpreter()
+
+		content := `
+recipe(
+    name = "invalid-cap",
+    version = "1.0.0",
+    requires = ["unknown"],
+    steps = [
+        edit(id = "dummy", operations = []),
+    ],
+)
+`
+		_, err := interp.LoadString("test.star", content)
+		if err == nil {
+			t.Fatal("expected error for unknown capability, got nil")
+		}
+	})
+}

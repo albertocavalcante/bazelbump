@@ -39,6 +39,11 @@ type Recipe struct {
 	// Empty string means no maximum version requirement.
 	MaxBazelVersion string
 
+	// Requires lists the capabilities this recipe needs to function.
+	// Capabilities like "exec" or "bcr" require user approval before execution.
+	// The "fs" capability is granted by default.
+	Requires []Capability
+
 	// Steps is the ordered list of steps to execute.
 	Steps []Step
 

@@ -65,6 +65,20 @@ func NewExecutor(projectPath string, opts Options) *Executor {
 	}
 }
 
+// NewExecutorWithInterpreter creates an executor with a custom interpreter.
+// This is useful when you need to configure the interpreter with specific
+// capabilities or options before execution.
+func NewExecutorWithInterpreter(projectPath string, opts Options, interp *Interpreter) *Executor {
+	return &Executor{
+		interpreter: interp,
+		projectPath: projectPath,
+		dryRun:      opts.DryRun,
+		verbose:     opts.Verbose,
+		logger:      opts.Logger,
+		tracker:     opts.Tracker,
+	}
+}
+
 // Options configures recipe execution.
 type Options struct {
 	DryRun      bool        // Preview changes without applying

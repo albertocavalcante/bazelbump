@@ -31,6 +31,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/albertocavalcante/bazelbump/analysis"
 	"github.com/albertocavalcante/bazelbump/flagdb"
@@ -38,6 +39,7 @@ import (
 	"github.com/albertocavalcante/bazelbump/recipe"
 	recipestar "github.com/albertocavalcante/bazelbump/recipe/starlark"
 	"github.com/albertocavalcante/bazelbump/transform"
+	"github.com/albertocavalcante/go-bcr"
 )
 
 // Version info set by build flags
@@ -1279,14 +1281,15 @@ func outputDiscoveredRecipeText(r *recipestar.DiscoveredRecipe) {
 
 // starlarkRecipeOutput is used for JSON serialization of Starlark recipes.
 type starlarkRecipeOutput struct {
-	Name            string                        `json:"name"`
-	Version         string                        `json:"version"`
-	Description     string                        `json:"description"`
-	Source          string                        `json:"source"`
-	Path            string                        `json:"path"`
-	MinBazelVersion string                        `json:"min_bazel_version,omitempty"`
-	MaxBazelVersion string                        `json:"max_bazel_version,omitempty"`
-	Steps           []starlarkStepOutput          `json:"steps"`
+	Name            string               `json:"name"`
+	Version         string               `json:"version"`
+	Description     string               `json:"description"`
+	Source          string               `json:"source"`
+	Path            string               `json:"path"`
+	MinBazelVersion string               `json:"min_bazel_version,omitempty"`
+	MaxBazelVersion string               `json:"max_bazel_version,omitempty"`
+	Requires        []string             `json:"requires,omitempty"`
+	Steps           []starlarkStepOutput `json:"steps"`
 }
 
 type starlarkStepOutput struct {
@@ -1299,6 +1302,12 @@ type starlarkStepOutput struct {
 
 // outputStarlarkRecipeJSON outputs a fully parsed Starlark recipe as JSON.
 func outputStarlarkRecipeJSON(r *recipestar.Recipe, discovered *recipestar.DiscoveredRecipe) error {
+	// Convert capabilities to strings
+	var requires []string
+	for _, cap := range r.Requires {
+		requires = append(requires, string(cap))
+	}
+
 	output := starlarkRecipeOutput{
 		Name:            r.Name,
 		Version:         r.Version,
@@ -1307,6 +1316,7 @@ func outputStarlarkRecipeJSON(r *recipestar.Recipe, discovered *recipestar.Disco
 		Path:            discovered.Path,
 		MinBazelVersion: r.MinBazelVersion,
 		MaxBazelVersion: r.MaxBazelVersion,
+		Requires:        requires,
 	}
 
 	for _, step := range r.Steps {
@@ -1362,6 +1372,23 @@ func outputStarlarkRecipeText(r *recipestar.Recipe, discovered *recipestar.Disco
 		} else {
 			fmt.Printf("<= %s\n", r.MaxBazelVersion)
 		}
+	}
+
+	// Show required capabilities
+	if len(r.Requires) > 0 {
+		fmt.Printf("  Requires:    ")
+		for i, cap := range r.Requires {
+			if i > 0 {
+				fmt.Printf(", ")
+			}
+			info := recipestar.GetCapabilityInfo(cap)
+			capColor := colorYellow
+			if info != nil && info.Risk == "high" {
+				capColor = colorRed
+			}
+			fmt.Printf("%s", color(capColor, string(cap)))
+		}
+		fmt.Println()
 	}
 
 	fmt.Printf("\n%s (%d total)\n", color(colorBold, "Steps:"), len(r.Steps))
@@ -1462,6 +1489,12 @@ recipe's steps. Always run with --dry-run first to preview changes.
   --checkpoint-interval  Files between auto checkpoints (default: 100, 0 to disable)
   --no-checkpoint        Disable checkpointing
   --progress <mode>      Progress output: auto, terminal, json, none (default: auto)
+
+  %s
+  --approve              Auto-approve declared capabilities (for CI/scripts)
+  --trust                Trust all capabilities without prompting
+  --allow <caps>         Allow specific capabilities (comma-separated: exec,bcr)
+  --deny <caps>          Deny specific capabilities (overrides --allow and --approve)
   --help                 Show this help
 
 %s
@@ -1489,6 +1522,12 @@ recipe's steps. Always run with --dry-run first to preview changes.
   # Resume a specific run
   bazelbump recipe run --resume-run abc123 autoload-migration
 
+  # Auto-approve recipe's declared capabilities
+  bazelbump recipe run --approve format-build
+
+  # Allow specific capabilities
+  bazelbump recipe run --allow=exec,bcr my-recipe
+
 %s
   If a step fails, the recipe's on_failure mode determines behavior:
   - rollback: Revert all changes and stop (default)
@@ -1504,11 +1543,18 @@ recipe's steps. Always run with --dry-run first to preview changes.
 
   Use 'bazelbump checkpoint list' to see available checkpoints.
   Use 'bazelbump status' to see if a run can be resumed.
+
+%s
+  Recipes can declare capabilities they require (exec, bcr). By default, you'll
+  be prompted to approve these capabilities interactively (30s timeout, auto-deny).
+  Use --approve to auto-approve declared capabilities in CI/scripts.
 `, color(colorBold, "Usage:"),
 			color(colorBold, "Flags:"),
+			color(colorBold, "Capabilities:"),
 			color(colorBold, "Examples:"),
 			color(colorBold, "Failure Handling:"),
-			color(colorBold, "Checkpointing:"))
+			color(colorBold, "Checkpointing:"),
+			color(colorBold, "Capability System:"))
 	}
 
 	dryRun := fs.Bool("dry-run", false, "Show what would change without applying")
@@ -1522,6 +1568,10 @@ recipe's steps. Always run with --dry-run first to preview changes.
 	checkpointInterval := fs.Int("checkpoint-interval", 100, "Files between auto checkpoints (0 to disable)")
 	noCheckpoint := fs.Bool("no-checkpoint", false, "Disable checkpointing")
 	progressMode := fs.String("progress", "auto", "Progress output: auto, terminal, json, none")
+	approve := fs.Bool("approve", false, "Auto-approve declared capabilities")
+	trust := fs.Bool("trust", false, "Trust all capabilities (CI/automation)")
+	allow := fs.String("allow", "", "Allow specific capabilities (comma-separated)")
+	deny := fs.String("deny", "", "Deny specific capabilities (comma-separated)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1543,11 +1593,19 @@ recipe's steps. Always run with --dry-run first to preview changes.
 		progressMode:       *progressMode,
 	}
 
+	// Build capability options
+	capOpts := &capabilityOptions{
+		approve: *approve,
+		trust:   *trust,
+		allow:   *allow,
+		deny:    *deny,
+	}
+
 	// Try to resolve as a discovered Starlark recipe first
 	discovered, resolveErr := recipestar.ResolveRecipe(name, *projectPath)
 	if resolveErr == nil {
 		// Found a Starlark recipe - run it
-		return runStarlarkRecipeWithState(discovered.Path, *projectPath, *dryRun, *stepID, *verbose, *jsonOutput, *noColor, stateRunOpts)
+		return runStarlarkRecipeWithState(discovered.Path, *projectPath, *dryRun, *stepID, *verbose, *jsonOutput, *noColor, stateRunOpts, capOpts)
 	}
 
 	// Fall back to built-in Go recipes
@@ -2038,13 +2096,21 @@ type starlarkStateOptions struct {
 	progressMode       string
 }
 
+// capabilityOptions holds capability-related flags.
+type capabilityOptions struct {
+	approve bool   // Auto-approve declared capabilities
+	trust   bool   // Trust all capabilities
+	allow   string // Comma-separated list of capabilities to allow
+	deny    string // Comma-separated list of capabilities to deny
+}
+
 // runStarlarkRecipe runs a Starlark .star recipe file (legacy, without state management).
 func runStarlarkRecipe(path, projectPath string, dryRun bool, stepID string, verbose, jsonOutput, noColor bool) error {
-	return runStarlarkRecipeWithState(path, projectPath, dryRun, stepID, verbose, jsonOutput, noColor, nil)
+	return runStarlarkRecipeWithState(path, projectPath, dryRun, stepID, verbose, jsonOutput, noColor, nil, nil)
 }
 
 // runStarlarkRecipeWithState runs a Starlark .star recipe file with state management.
-func runStarlarkRecipeWithState(path, projectPath string, dryRun bool, stepID string, verbose, jsonOutput, noColor bool, stateOpts *starlarkStateOptions) error {
+func runStarlarkRecipeWithState(path, projectPath string, dryRun bool, stepID string, verbose, jsonOutput, noColor bool, stateOpts *starlarkStateOptions, capOpts *capabilityOptions) error {
 	// Resolve path
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -2054,6 +2120,27 @@ func runStarlarkRecipeWithState(path, projectPath string, dryRun bool, stepID st
 	// Check file exists
 	if _, err := os.Stat(absPath); err != nil {
 		return fmt.Errorf("recipe file not found: %s", path)
+	}
+
+	// Phase 1: Parse recipe (without capabilities) to get requirements
+	parseInterp := recipestar.NewInterpreter(recipestar.WithProjectPath(projectPath))
+	recipe, parseErr := parseInterp.LoadFile(absPath)
+	if parseErr != nil {
+		return fmt.Errorf("failed to parse recipe: %w", parseErr)
+	}
+
+	// Phase 2: Build capability config from flags and resolve capabilities
+	capConfig, err := resolveCapabilities(recipe, capOpts, verbose)
+	if err != nil {
+		return err
+	}
+
+	// Phase 3: Build interpreter options with approved capabilities
+	interpOpts := recipestar.WithCapabilities(projectPath, capConfig)
+
+	// Add BCR client if bcr capability is granted
+	if capConfig.IsGranted(recipestar.CapabilityBCR) {
+		interpOpts = append(interpOpts, recipestar.WithBCRClient(bcr.New()))
 	}
 
 	// Base options
@@ -2095,13 +2182,10 @@ func runStarlarkRecipeWithState(path, projectPath string, dryRun bool, stepID st
 				resumeRunID := stateOpts.resumeRun
 				if resumeRunID == "" {
 					// Find the latest interrupted run for this recipe
-					recipe, parseErr := recipestar.NewInterpreter().LoadFile(absPath)
-					if parseErr == nil {
-						latestRun, runErr := mgr.GetLatestRun(recipe.Name)
-						if runErr == nil && latestRun != nil &&
-							(latestRun.Status == state.RunStatusInterrupted || latestRun.Status == state.RunStatusRunning) {
-							resumeRunID = latestRun.ID
-						}
+					latestRun, runErr := mgr.GetLatestRun(recipe.Name)
+					if runErr == nil && latestRun != nil &&
+						(latestRun.Status == state.RunStatusInterrupted || latestRun.Status == state.RunStatusRunning) {
+						resumeRunID = latestRun.ID
 					}
 				}
 				if resumeRunID != "" {
@@ -2138,18 +2222,21 @@ func runStarlarkRecipeWithState(path, projectPath string, dryRun bool, stepID st
 		}
 	}
 
-	// Create executor with state management if options provided
+	// Phase 4: Create executor with capabilities and execute
 	var result *recipestar.Result
 	if len(execOpts) > 0 {
 		executor := recipestar.NewExecutorWithOptions(projectPath, baseOpts, execOpts...)
-		recipe, parseErr := executor.Interpret(absPath)
+		// Re-parse with capabilities enabled
+		execInterp := recipestar.NewInterpreter(interpOpts...)
+		recipe, parseErr = execInterp.LoadFile(absPath)
 		if parseErr != nil {
 			return fmt.Errorf("failed to parse recipe: %w", parseErr)
 		}
 		result, err = executor.ExecuteWithState(recipe, baseOpts)
 	} else {
 		// Fall back to regular executor without state management
-		executor := recipestar.NewExecutor(projectPath, baseOpts)
+		// Create executor with interpreter that has capabilities
+		executor := recipestar.NewExecutorWithInterpreter(projectPath, baseOpts, recipestar.NewInterpreter(interpOpts...))
 		result, err = executor.ExecuteFromFile(absPath, baseOpts)
 	}
 
@@ -2167,6 +2254,110 @@ func runStarlarkRecipeWithState(path, projectPath string, dryRun bool, stepID st
 		os.Exit(1)
 	}
 	return nil
+}
+
+// resolveCapabilities builds a capability config from flags and prompts if needed.
+func resolveCapabilities(recipe *recipestar.Recipe, capOpts *capabilityOptions, verbose bool) (*recipestar.CapabilityConfig, error) {
+	config := recipestar.NewCapabilityConfig()
+
+	if capOpts == nil {
+		capOpts = &capabilityOptions{}
+	}
+
+	// Handle --trust: grant all capabilities
+	if capOpts.trust {
+		config.TrustAll = true
+	}
+
+	// Handle --allow: grant specific capabilities
+	if capOpts.allow != "" {
+		allowed, err := recipestar.ParseCapabilities(capOpts.allow)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --allow value: %w", err)
+		}
+		config.Grant(allowed...)
+	}
+
+	// Handle --deny: deny specific capabilities (takes precedence)
+	if capOpts.deny != "" {
+		denied, err := recipestar.ParseCapabilities(capOpts.deny)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --deny value: %w", err)
+		}
+		config.Deny(denied...)
+	}
+
+	// Handle --approve: auto-approve declared capabilities
+	if capOpts.approve {
+		config.Grant(recipe.Requires...)
+	}
+
+	// Check if any required capabilities are missing
+	missing := config.RequiredButNotGranted(recipe.Requires)
+	if len(missing) == 0 {
+		return config, nil
+	}
+
+	// Prompt for missing capabilities if interactive
+	if !isTerminal() {
+		// Non-interactive: fail with instructions
+		return nil, fmt.Errorf("recipe %q requires capabilities: %s\n\nUse --approve to auto-approve, or --allow=%s to grant specific capabilities",
+			recipe.Name,
+			recipestar.FormatCapabilityList(missing),
+			recipestar.FormatCapabilityList(missing))
+	}
+
+	// Interactive prompt with 30s timeout
+	approved, err := promptForCapabilities(recipe.Name, missing)
+	if err != nil {
+		return nil, err
+	}
+
+	if approved {
+		config.Grant(missing...)
+	} else {
+		return nil, fmt.Errorf("capabilities not approved")
+	}
+
+	return config, nil
+}
+
+// promptForCapabilities prompts the user to approve capabilities with a 30s timeout.
+func promptForCapabilities(recipeName string, caps []recipestar.Capability) (bool, error) {
+	fmt.Printf("\nRecipe %q requires:\n", recipeName)
+	for _, cap := range caps {
+		info := recipestar.GetCapabilityInfo(cap)
+		if info != nil {
+			riskColor := colorYellow
+			if info.Risk == "high" {
+				riskColor = colorRed
+			} else if info.Risk == "low" {
+				riskColor = colorGreen
+			}
+			fmt.Printf("  - %s: %s %s\n", color(colorBold, string(cap)), info.Description, color(riskColor, "("+info.Risk+" risk)"))
+		} else {
+			fmt.Printf("  - %s\n", cap)
+		}
+	}
+	fmt.Printf("\nApprove? [y/N] (auto-deny in 30s): ")
+
+	// Create a channel for the response
+	responseCh := make(chan string, 1)
+
+	go func() {
+		var response string
+		fmt.Scanln(&response)
+		responseCh <- strings.TrimSpace(strings.ToLower(response))
+	}()
+
+	// Wait for response or timeout
+	select {
+	case response := <-responseCh:
+		return response == "y" || response == "yes", nil
+	case <-time.After(30 * time.Second):
+		fmt.Println("\nTimeout - capabilities denied.")
+		return false, nil
+	}
 }
 
 // isTerminal returns true if stdout is a terminal.
