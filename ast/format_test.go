@@ -11,6 +11,11 @@ import (
 // TestFormat_StringEscaping tests that string escape sequences are preserved.
 // This was a bug found in Envoy: strings like "touch \"$(@D)/file\"" were
 // being corrupted to "touch "$(@D)/file"" (losing the backslash escapes).
+//
+// Bug discovered during Envoy validation - the formatter was outputting
+// StringExpr.Value (decoded) instead of StringExpr.Token (original with escapes).
+//
+// Envoy reference: commit 772676aa95f21d617b9c43b5b723eed03c9025e5
 func TestFormat_StringEscaping(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -18,6 +23,8 @@ func TestFormat_StringEscaping(t *testing.T) {
 		contains []string // substrings that must be in output
 	}{
 		{
+			// Source: https://github.com/envoyproxy/envoy/blob/772676aa95f21d617b9c43b5b723eed03c9025e5/bazel/external/BUILD#L25
+			// Original: cmd = "touch \"$(@D)/empty.cc\""
 			name: "escaped quotes in genrule cmd",
 			input: `genrule(
     name = "test",
@@ -26,6 +33,8 @@ func TestFormat_StringEscaping(t *testing.T) {
 			contains: []string{`"touch \"$(@D)/empty.cc\""`},
 		},
 		{
+			// Source: https://github.com/envoyproxy/envoy/blob/772676aa95f21d617b9c43b5b723eed03c9025e5/bazel/external/BUILD#L61
+			// Original: cmd = "mkdir -p $$(dirname $@) && cp $< $@"
 			name: "shell variables with dollar sign",
 			input: `genrule(
     name = "test",
@@ -94,7 +103,12 @@ func TestFormat_StringEscaping(t *testing.T) {
 
 // TestFormat_ParenExpr tests parenthesized expressions.
 // This was a bug found in Envoy: expressions like (len(X) + len(Y)) were
-// being output as <*bzl.ParenExpr>.
+// being output as <*bzl.ParenExpr> instead of the actual expression.
+//
+// The formatter was missing a case for bzl.ParenExpr, causing it to fall
+// through to the default case which outputs the type name.
+//
+// Envoy reference: commit 772676aa95f21d617b9c43b5b723eed03c9025e5
 func TestFormat_ParenExpr(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -102,6 +116,12 @@ func TestFormat_ParenExpr(t *testing.T) {
 		contains []string
 	}{
 		{
+			// Source: https://github.com/envoyproxy/envoy/blob/772676aa95f21d617b9c43b5b723eed03c9025e5/tools/code/BUILD#L13-L16
+			// Original:
+			//   FUZZ_FILTER_COUNT = (
+			//       len(READFILTER_FUZZ_FILTERS) +
+			//       len(READFILTER_NOFUZZ_FILTERS)
+			//   )
 			name: "simple paren expression",
 			input: `TOTAL = (
     len(LIST_A) +
@@ -152,7 +172,11 @@ func TestFormat_ParenExpr(t *testing.T) {
 
 // TestFormat_TupleExpr tests tuple expressions.
 // This was a bug found in Envoy: tuples like (FUZZ_COUNT, PATH) were
-// being output as <*bzl.TupleExpr>.
+// being output as <*bzl.TupleExpr> instead of the actual tuple.
+//
+// The formatter was missing a case for bzl.TupleExpr.
+//
+// Envoy reference: commit 772676aa95f21d617b9c43b5b723eed03c9025e5
 func TestFormat_TupleExpr(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -160,6 +184,12 @@ func TestFormat_TupleExpr(t *testing.T) {
 		contains []string
 	}{
 		{
+			// Source: https://github.com/envoyproxy/envoy/blob/772676aa95f21d617b9c43b5b723eed03c9025e5/tools/code/BUILD#L70-L73
+			// Original:
+			//   """ % (
+			//       FUZZ_FILTER_COUNT,
+			//       PATH,
+			//   ),
 			name:     "tuple in string format",
 			input:    `MSG = "Values: %s, %s" % (VALUE_A, VALUE_B)`,
 			contains: []string{"(VALUE_A, VALUE_B)"},
@@ -217,7 +247,12 @@ func TestFormat_TupleExpr(t *testing.T) {
 
 // TestFormat_Comprehension tests list and dict comprehensions.
 // This was a bug found in Envoy: comprehensions like [x for x in items]
-// were being output as <*bzl.Comprehension>.
+// were being output as <*bzl.Comprehension> instead of the actual comprehension.
+//
+// The formatter was missing cases for bzl.Comprehension, bzl.ForClause, and
+// bzl.IfClause. Envoy uses comprehensions to generate multiple similar targets.
+//
+// Envoy reference: commit 772676aa95f21d617b9c43b5b723eed03c9025e5
 func TestFormat_Comprehension(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -250,6 +285,8 @@ func TestFormat_Comprehension(t *testing.T) {
 			contains: []string{"f.name", "for f in get_files()"},
 		},
 		{
+			// Source: https://github.com/envoyproxy/envoy/blob/772676aa95f21d617b9c43b5b723eed03c9025e5/test/common/http/BUILD#L104-L131
+			// Original: Generates fuzz tests for http1/http2 protocols using comprehension
 			name: "envoy-style fuzz test comprehension",
 			input: `[
     envoy_cc_fuzz_test(
@@ -293,12 +330,18 @@ func TestFormat_Comprehension(t *testing.T) {
 
 // TestFormat_RoundTrip tests that parse -> format -> parse produces valid output.
 // These are real-world patterns from Envoy that previously caused issues.
+//
+// Each test case is derived from actual Envoy BUILD files that failed during
+// AST transformation validation.
+//
+// Envoy reference: commit 772676aa95f21d617b9c43b5b723eed03c9025e5
 func TestFormat_RoundTrip(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
 	}{
 		{
+			// Source: https://github.com/envoyproxy/envoy/blob/772676aa95f21d617b9c43b5b723eed03c9025e5/bazel/external/BUILD#L22-L27
 			name: "genrule with shell escapes",
 			input: `genrule(
     name = "empty_cc",
@@ -308,6 +351,8 @@ func TestFormat_RoundTrip(t *testing.T) {
 )`,
 		},
 		{
+			// Source: https://github.com/envoyproxy/envoy/blob/772676aa95f21d617b9c43b5b723eed03c9025e5/tools/code/BUILD#L50-L79
+			// Simplified from the checked genrule that uses triple-quoted heredoc cmd
 			name: "genrule with heredoc-style cmd",
 			input: `genrule(
     name = "checked",
@@ -321,6 +366,7 @@ func TestFormat_RoundTrip(t *testing.T) {
 )`,
 		},
 		{
+			// Source: https://github.com/envoyproxy/envoy/blob/772676aa95f21d617b9c43b5b723eed03c9025e5/tools/code/BUILD#L13-L16
 			name: "arithmetic with parens",
 			input: `FUZZ_FILTER_COUNT = (
     len(READFILTER_FUZZ_FILTERS) +
@@ -328,6 +374,7 @@ func TestFormat_RoundTrip(t *testing.T) {
 )`,
 		},
 		{
+			// Source: https://github.com/envoyproxy/envoy/blob/772676aa95f21d617b9c43b5b723eed03c9025e5/tools/code/BUILD#L35-L36
 			name: "string format with tuple",
 			input: `py_console_script_binary(
     name = "check",
@@ -338,6 +385,7 @@ func TestFormat_RoundTrip(t *testing.T) {
 )`,
 		},
 		{
+			// Source: https://github.com/envoyproxy/envoy/blob/772676aa95f21d617b9c43b5b723eed03c9025e5/test/common/http/BUILD#L104-L131
 			name: "list comprehension generating targets",
 			input: `[
     envoy_cc_fuzz_test(
@@ -355,6 +403,7 @@ func TestFormat_RoundTrip(t *testing.T) {
 ]`,
 		},
 		{
+			// Source: https://github.com/envoyproxy/envoy/blob/772676aa95f21d617b9c43b5b723eed03c9025e5/bazel/external/BUILD#L33-L44
 			name: "select with dict",
 			input: `cc_library(
     name = "gperftools",
@@ -371,6 +420,8 @@ func TestFormat_RoundTrip(t *testing.T) {
 )`,
 		},
 		{
+			// Source: https://github.com/envoyproxy/envoy/blob/772676aa95f21d617b9c43b5b723eed03c9025e5/test/common/http/BUILD#L1-L11
+			// This is the CRITICAL pattern that broke 96% of Envoy files with text-based approach
 			name: "multi-line load with many symbols",
 			input: `load(
     "//bazel:envoy_build_system.bzl",
@@ -385,6 +436,7 @@ func TestFormat_RoundTrip(t *testing.T) {
 )`,
 		},
 		{
+			// Source: https://github.com/envoyproxy/envoy/blob/772676aa95f21d617b9c43b5b723eed03c9025e5/bazel/external/BUILD#L58-L64
 			name: "complex genrule with multiple escapes",
 			input: `genrule(
     name = "numa_archive",
@@ -504,6 +556,21 @@ genrule(
 
 // TestFormat_EnsureLoadPreservesContent tests that EnsureLoad + Format
 // preserves the original file content (except for the added load).
+//
+// This is the integration test that validates the original bug is fixed:
+// The text-based ensure_load implementation was inserting new load statements
+// INSIDE multi-line load statements, corrupting 96% of Envoy BUILD files.
+//
+// Example of the bug (text-based):
+//   load(                           <-- Text-based found "load(" here
+//   load("@rules_cc//...")          <-- And inserted new load INSIDE!
+//       "//bazel:envoy_build_system.bzl",
+//       ...
+//   )
+//
+// The AST-based approach correctly identifies statement boundaries.
+//
+// Envoy reference: commit 772676aa95f21d617b9c43b5b723eed03c9025e5
 func TestFormat_EnsureLoadPreservesContent(t *testing.T) {
 	input := `load(
     "//bazel:envoy_build_system.bzl",
