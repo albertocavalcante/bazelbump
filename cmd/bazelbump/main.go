@@ -34,6 +34,7 @@ import (
 
 	"github.com/albertocavalcante/bazelbump/analysis"
 	"github.com/albertocavalcante/bazelbump/flagdb"
+	"github.com/albertocavalcante/bazelbump/pkg/state"
 	"github.com/albertocavalcante/bazelbump/recipe"
 	recipestar "github.com/albertocavalcante/bazelbump/recipe/starlark"
 	"github.com/albertocavalcante/bazelbump/transform"
@@ -1450,13 +1451,18 @@ recipe's steps. Always run with --dry-run first to preview changes.
   bazelbump recipe run [flags] ./path/to/recipe.star
 
 %s
-  --dry-run    Show what would change without applying (recommended first)
-  --path       Path to project directory (default: current directory)
-  --step       Run only a specific step (by ID)
-  --verbose    Show verbose output
-  --json       Output results as JSON (machine-readable)
-  --no-color   Disable colored output
-  --help       Show this help
+  --dry-run              Show what would change without applying (recommended first)
+  --path                 Path to project directory (default: current directory)
+  --step                 Run only a specific step (by ID)
+  --verbose              Show verbose output
+  --json                 Output results as JSON (machine-readable)
+  --no-color             Disable colored output
+  --resume               Resume from the last interrupted run
+  --resume-run <id>      Resume from a specific run ID
+  --checkpoint-interval  Files between auto checkpoints (default: 100, 0 to disable)
+  --no-checkpoint        Disable checkpointing
+  --progress <mode>      Progress output: auto, terminal, json, none (default: auto)
+  --help                 Show this help
 
 %s
   # Preview changes (always do this first)
@@ -1477,15 +1483,32 @@ recipe's steps. Always run with --dry-run first to preview changes.
   # Get machine-readable output
   bazelbump recipe run --dry-run --json autoload-migration
 
+  # Resume an interrupted run
+  bazelbump recipe run --resume autoload-migration
+
+  # Resume a specific run
+  bazelbump recipe run --resume-run abc123 autoload-migration
+
 %s
   If a step fails, the recipe's on_failure mode determines behavior:
   - rollback: Revert all changes and stop (default)
   - stop:     Stop but keep changes made so far
   - continue: Log error and continue with next step
+
+%s
+  Checkpoints are created automatically during execution to allow resuming
+  interrupted runs. They are created:
+  - Every N files (default: 100, configurable with --checkpoint-interval)
+  - At step boundaries
+  - When the process receives SIGINT/SIGTERM
+
+  Use 'bazelbump checkpoint list' to see available checkpoints.
+  Use 'bazelbump status' to see if a run can be resumed.
 `, color(colorBold, "Usage:"),
 			color(colorBold, "Flags:"),
 			color(colorBold, "Examples:"),
-			color(colorBold, "Failure Handling:"))
+			color(colorBold, "Failure Handling:"),
+			color(colorBold, "Checkpointing:"))
 	}
 
 	dryRun := fs.Bool("dry-run", false, "Show what would change without applying")
@@ -1494,6 +1517,11 @@ recipe's steps. Always run with --dry-run first to preview changes.
 	verbose := fs.Bool("verbose", false, "Show verbose output")
 	jsonOutput := fs.Bool("json", false, "Output results as JSON")
 	noColor := fs.Bool("no-color", false, "Disable colored output")
+	resume := fs.Bool("resume", false, "Resume from the last interrupted run")
+	resumeRun := fs.String("resume-run", "", "Resume from a specific run ID")
+	checkpointInterval := fs.Int("checkpoint-interval", 100, "Files between auto checkpoints (0 to disable)")
+	noCheckpoint := fs.Bool("no-checkpoint", false, "Disable checkpointing")
+	progressMode := fs.String("progress", "auto", "Progress output: auto, terminal, json, none")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1506,11 +1534,20 @@ recipe's steps. Always run with --dry-run first to preview changes.
 
 	name := fs.Arg(0)
 
+	// Build state options for Starlark recipes
+	stateRunOpts := &starlarkStateOptions{
+		resume:             *resume,
+		resumeRun:          *resumeRun,
+		checkpointInterval: *checkpointInterval,
+		noCheckpoint:       *noCheckpoint,
+		progressMode:       *progressMode,
+	}
+
 	// Try to resolve as a discovered Starlark recipe first
 	discovered, resolveErr := recipestar.ResolveRecipe(name, *projectPath)
 	if resolveErr == nil {
 		// Found a Starlark recipe - run it
-		return runStarlarkRecipe(discovered.Path, *projectPath, *dryRun, *stepID, *verbose, *jsonOutput, *noColor)
+		return runStarlarkRecipeWithState(discovered.Path, *projectPath, *dryRun, *stepID, *verbose, *jsonOutput, *noColor, stateRunOpts)
 	}
 
 	// Fall back to built-in Go recipes
@@ -1992,8 +2029,22 @@ func formatSearchPaths(projectPath string) string {
 	return sb.String()
 }
 
-// runStarlarkRecipe runs a Starlark .star recipe file.
+// starlarkStateOptions holds state management options for recipe execution.
+type starlarkStateOptions struct {
+	resume             bool
+	resumeRun          string
+	checkpointInterval int
+	noCheckpoint       bool
+	progressMode       string
+}
+
+// runStarlarkRecipe runs a Starlark .star recipe file (legacy, without state management).
 func runStarlarkRecipe(path, projectPath string, dryRun bool, stepID string, verbose, jsonOutput, noColor bool) error {
+	return runStarlarkRecipeWithState(path, projectPath, dryRun, stepID, verbose, jsonOutput, noColor, nil)
+}
+
+// runStarlarkRecipeWithState runs a Starlark .star recipe file with state management.
+func runStarlarkRecipeWithState(path, projectPath string, dryRun bool, stepID string, verbose, jsonOutput, noColor bool, stateOpts *starlarkStateOptions) error {
 	// Resolve path
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -2005,19 +2056,103 @@ func runStarlarkRecipe(path, projectPath string, dryRun bool, stepID string, ver
 		return fmt.Errorf("recipe file not found: %s", path)
 	}
 
-	// Create executor
-	executor := recipestar.NewExecutor(projectPath, recipestar.Options{
+	// Base options
+	baseOpts := recipestar.Options{
 		DryRun:  dryRun,
 		Verbose: verbose,
 		StepID:  stepID,
-	})
+	}
 
-	// Execute the recipe
-	result, err := executor.ExecuteFromFile(absPath, recipestar.Options{
-		DryRun:  dryRun,
-		Verbose: verbose,
-		StepID:  stepID,
-	})
+	// Build executor options for state management
+	var execOpts []recipestar.ExecutorOption
+
+	// Initialize state manager if available and not dry run
+	if state.Available() && stateOpts != nil {
+		// Initialize state manager
+		dbPath := state.StateDBPath(projectPath)
+		mgr, err := state.New(dbPath)
+		if err != nil {
+			if verbose {
+				fmt.Printf("Warning: failed to initialize state manager: %v\n", err)
+			}
+		} else {
+			// Note: We need to defer Close() somewhere appropriate
+			// For now, we'll rely on the process ending to close it
+			execOpts = append(execOpts, recipestar.WithStateManager(mgr))
+
+			// Configure checkpointing
+			if !stateOpts.noCheckpoint && !dryRun {
+				cpConfig := recipestar.DefaultCheckpointConfig()
+				cpConfig.AutoInterval = stateOpts.checkpointInterval
+				if stateOpts.checkpointInterval <= 0 {
+					cpConfig.Enabled = false
+				}
+				execOpts = append(execOpts, recipestar.WithCheckpointConfig(cpConfig))
+			}
+
+			// Handle resume
+			if stateOpts.resume || stateOpts.resumeRun != "" {
+				resumeRunID := stateOpts.resumeRun
+				if resumeRunID == "" {
+					// Find the latest interrupted run for this recipe
+					recipe, parseErr := recipestar.NewInterpreter().LoadFile(absPath)
+					if parseErr == nil {
+						latestRun, runErr := mgr.GetLatestRun(recipe.Name)
+						if runErr == nil && latestRun != nil &&
+							(latestRun.Status == state.RunStatusInterrupted || latestRun.Status == state.RunStatusRunning) {
+							resumeRunID = latestRun.ID
+						}
+					}
+				}
+				if resumeRunID != "" {
+					execOpts = append(execOpts, recipestar.WithResume(resumeRunID, ""))
+					if verbose {
+						fmt.Printf("Resuming run: %s\n", resumeRunID)
+					}
+				} else if stateOpts.resume {
+					return fmt.Errorf("no interrupted run found to resume")
+				}
+			}
+
+			// Configure progress reporter based on mode
+			var progressReporter recipestar.ProgressReporter
+			switch stateOpts.progressMode {
+			case "terminal":
+				progressReporter = newTerminalProgressReporter(verbose)
+			case "json":
+				progressReporter = newJSONProgressReporter()
+			case "none":
+				progressReporter = &recipestar.NoopProgressReporter{}
+			case "auto":
+				if jsonOutput {
+					progressReporter = newJSONProgressReporter()
+				} else if isTerminal() {
+					progressReporter = newTerminalProgressReporter(verbose)
+				} else {
+					progressReporter = &recipestar.NoopProgressReporter{}
+				}
+			default:
+				progressReporter = &recipestar.NoopProgressReporter{}
+			}
+			execOpts = append(execOpts, recipestar.WithProgressReporter(progressReporter))
+		}
+	}
+
+	// Create executor with state management if options provided
+	var result *recipestar.Result
+	if len(execOpts) > 0 {
+		executor := recipestar.NewExecutorWithOptions(projectPath, baseOpts, execOpts...)
+		recipe, parseErr := executor.Interpret(absPath)
+		if parseErr != nil {
+			return fmt.Errorf("failed to parse recipe: %w", parseErr)
+		}
+		result, err = executor.ExecuteWithState(recipe, baseOpts)
+	} else {
+		// Fall back to regular executor without state management
+		executor := recipestar.NewExecutor(projectPath, baseOpts)
+		result, err = executor.ExecuteFromFile(absPath, baseOpts)
+	}
+
 	if err != nil {
 		return fmt.Errorf("recipe execution failed: %w", err)
 	}
@@ -2032,6 +2167,187 @@ func runStarlarkRecipe(path, projectPath string, dryRun bool, stepID string, ver
 		os.Exit(1)
 	}
 	return nil
+}
+
+// isTerminal returns true if stdout is a terminal.
+func isTerminal() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// terminalProgressReporter displays progress on a terminal.
+type terminalProgressReporter struct {
+	verbose bool
+}
+
+func newTerminalProgressReporter(verbose bool) *terminalProgressReporter {
+	return &terminalProgressReporter{verbose: verbose}
+}
+
+func (t *terminalProgressReporter) RunStart(runID, recipeName string) {
+	fmt.Printf("Starting run %s for %s\n", truncateID(runID, 8), recipeName)
+}
+
+func (t *terminalProgressReporter) RunComplete(runID string, success bool, durationMs int64) {
+	if success {
+		fmt.Printf("Run completed in %dms\n", durationMs)
+	} else {
+		fmt.Printf("Run failed after %dms\n", durationMs)
+	}
+}
+
+func (t *terminalProgressReporter) RunError(runID string, err error) {
+	fmt.Fprintf(os.Stderr, "Run error: %v\n", err)
+}
+
+func (t *terminalProgressReporter) StepStart(stepName string, stepIndex, totalSteps int) {
+	fmt.Printf("[%d/%d] %s...\n", stepIndex+1, totalSteps, stepName)
+}
+
+func (t *terminalProgressReporter) StepComplete(stepName string, success bool, description string) {
+	if success {
+		fmt.Printf("  Done: %s\n", description)
+	}
+}
+
+func (t *terminalProgressReporter) FileStart(path string) {
+	if t.verbose {
+		fmt.Printf("  Processing: %s\n", path)
+	}
+}
+
+func (t *terminalProgressReporter) FileChanged(path string) {
+	if t.verbose {
+		fmt.Printf("  Modified: %s\n", path)
+	}
+}
+
+func (t *terminalProgressReporter) FileUnchanged(path string) {
+	// Don't report unchanged files
+}
+
+func (t *terminalProgressReporter) FileSkipped(path, reason string) {
+	if t.verbose {
+		fmt.Printf("  Skipped: %s (%s)\n", path, reason)
+	}
+}
+
+func (t *terminalProgressReporter) FileError(path string, err error) {
+	fmt.Fprintf(os.Stderr, "  Error: %s: %v\n", path, err)
+}
+
+func (t *terminalProgressReporter) CheckpointCreated(checkpointID string, filesProcessed int) {
+	if t.verbose {
+		fmt.Printf("  Checkpoint created at %d files\n", filesProcessed)
+	}
+}
+
+func (t *terminalProgressReporter) CheckpointRestored(checkpointID string) {
+	fmt.Printf("Restored from checkpoint %s\n", truncateID(checkpointID, 8))
+}
+
+func (t *terminalProgressReporter) Info(format string, args ...any) {
+	fmt.Printf(format+"\n", args...)
+}
+
+func (t *terminalProgressReporter) Warning(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "Warning: "+format+"\n", args...)
+}
+
+// jsonProgressReporter outputs progress events as JSON lines.
+type jsonProgressReporter struct{}
+
+func newJSONProgressReporter() *jsonProgressReporter {
+	return &jsonProgressReporter{}
+}
+
+type progressEvent struct {
+	Event   string `json:"event"`
+	RunID   string `json:"run_id,omitempty"`
+	Recipe  string `json:"recipe,omitempty"`
+	Step    string `json:"step,omitempty"`
+	File    string `json:"file,omitempty"`
+	Success bool   `json:"success,omitempty"`
+	Message string `json:"message,omitempty"`
+	Data    any    `json:"data,omitempty"`
+}
+
+func (j *jsonProgressReporter) emitEvent(event string, data any) {
+	e := progressEvent{Event: event, Data: data}
+	json.NewEncoder(os.Stdout).Encode(e)
+}
+
+func (j *jsonProgressReporter) RunStart(runID, recipeName string) {
+	e := progressEvent{Event: "run_start", RunID: runID, Recipe: recipeName}
+	json.NewEncoder(os.Stdout).Encode(e)
+}
+
+func (j *jsonProgressReporter) RunComplete(runID string, success bool, durationMs int64) {
+	e := progressEvent{Event: "run_complete", RunID: runID, Success: success, Data: map[string]int64{"duration_ms": durationMs}}
+	json.NewEncoder(os.Stdout).Encode(e)
+}
+
+func (j *jsonProgressReporter) RunError(runID string, err error) {
+	e := progressEvent{Event: "run_error", RunID: runID, Message: err.Error()}
+	json.NewEncoder(os.Stdout).Encode(e)
+}
+
+func (j *jsonProgressReporter) StepStart(stepName string, stepIndex, totalSteps int) {
+	e := progressEvent{Event: "step_start", Step: stepName, Data: map[string]int{"index": stepIndex, "total": totalSteps}}
+	json.NewEncoder(os.Stdout).Encode(e)
+}
+
+func (j *jsonProgressReporter) StepComplete(stepName string, success bool, description string) {
+	e := progressEvent{Event: "step_complete", Step: stepName, Success: success, Message: description}
+	json.NewEncoder(os.Stdout).Encode(e)
+}
+
+func (j *jsonProgressReporter) FileStart(path string) {
+	e := progressEvent{Event: "file_start", File: path}
+	json.NewEncoder(os.Stdout).Encode(e)
+}
+
+func (j *jsonProgressReporter) FileChanged(path string) {
+	e := progressEvent{Event: "file_changed", File: path}
+	json.NewEncoder(os.Stdout).Encode(e)
+}
+
+func (j *jsonProgressReporter) FileUnchanged(path string) {
+	e := progressEvent{Event: "file_unchanged", File: path}
+	json.NewEncoder(os.Stdout).Encode(e)
+}
+
+func (j *jsonProgressReporter) FileSkipped(path, reason string) {
+	e := progressEvent{Event: "file_skipped", File: path, Message: reason}
+	json.NewEncoder(os.Stdout).Encode(e)
+}
+
+func (j *jsonProgressReporter) FileError(path string, err error) {
+	e := progressEvent{Event: "file_error", File: path, Message: err.Error()}
+	json.NewEncoder(os.Stdout).Encode(e)
+}
+
+func (j *jsonProgressReporter) CheckpointCreated(checkpointID string, filesProcessed int) {
+	e := progressEvent{Event: "checkpoint_created", Data: map[string]any{"checkpoint_id": checkpointID, "files_processed": filesProcessed}}
+	json.NewEncoder(os.Stdout).Encode(e)
+}
+
+func (j *jsonProgressReporter) CheckpointRestored(checkpointID string) {
+	e := progressEvent{Event: "checkpoint_restored", Data: map[string]string{"checkpoint_id": checkpointID}}
+	json.NewEncoder(os.Stdout).Encode(e)
+}
+
+func (j *jsonProgressReporter) Info(format string, args ...any) {
+	e := progressEvent{Event: "info", Message: fmt.Sprintf(format, args...)}
+	json.NewEncoder(os.Stdout).Encode(e)
+}
+
+func (j *jsonProgressReporter) Warning(format string, args ...any) {
+	e := progressEvent{Event: "warning", Message: fmt.Sprintf(format, args...)}
+	json.NewEncoder(os.Stdout).Encode(e)
 }
 
 // convertStarlarkResult converts a starlark.Result to a recipe.Result.
