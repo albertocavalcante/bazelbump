@@ -20,10 +20,12 @@ func makeBcrModule(client *bcr.Client) starlark.Value {
 		"metadata":       starlark.NewBuiltin("bcr.metadata", bcrMetadata(client)),
 		"source":         starlark.NewBuiltin("bcr.source", bcrSource(client)),
 		"latest":         starlark.NewBuiltin("bcr.latest", bcrLatest(client)),
+		"latest_stable":  starlark.NewBuiltin("bcr.latest_stable", bcrLatestStable(client)),
 		"versions":       starlark.NewBuiltin("bcr.versions", bcrVersions(client)),
 		"exists":         starlark.NewBuiltin("bcr.exists", bcrExists(client)),
 		"version_exists": starlark.NewBuiltin("bcr.version_exists", bcrVersionExists(client)),
 		"is_yanked":      starlark.NewBuiltin("bcr.is_yanked", bcrIsYanked(client)),
+		"is_prerelease":  starlark.NewBuiltin("bcr.is_prerelease", bcrIsPrerelease()),
 	}
 	return starlarkstruct.FromStringDict(starlarkstruct.Default, members)
 }
@@ -95,6 +97,7 @@ func bcrMetadata(client *bcr.Client) func(*starlark.Thread, *starlark.Builtin, s
 			"homepage":        starlark.String(meta.Homepage),
 			"repository":      starlark.NewList(repos),
 			"latest":          starlark.String(meta.Latest()),
+			"latest_stable":   starlark.String(meta.LatestStable()),
 		}), nil
 	}
 }
@@ -273,5 +276,50 @@ func bcrIsYanked(client *bcr.Client) func(*starlark.Thread, *starlark.Builtin, s
 		}
 
 		return starlark.Bool(meta.IsYanked(version)), nil
+	}
+}
+
+// bcrLatestStable implements bcr.latest_stable(module) -> string
+// Returns the latest non-yanked, non-prerelease version.
+// Falls back to latest prerelease if no stable version exists.
+func bcrLatestStable(client *bcr.Client) func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error) {
+	return func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		if err := requireClient(client, "bcr.latest_stable"); err != nil {
+			return nil, err
+		}
+
+		var module string
+		if err := starlark.UnpackArgs("bcr.latest_stable", args, kwargs, "module", &module); err != nil {
+			return nil, err
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), bcrTimeout)
+		defer cancel()
+
+		meta, err := client.Metadata(ctx, module)
+		if err != nil {
+			return nil, fmt.Errorf("bcr.latest_stable: %w", err)
+		}
+
+		stable := meta.LatestStable()
+		if stable == "" {
+			return nil, fmt.Errorf("bcr.latest_stable: no stable version found for %s", module)
+		}
+
+		return starlark.String(stable), nil
+	}
+}
+
+// bcrIsPrerelease implements bcr.is_prerelease(version) -> bool
+// Returns true if the version string indicates a prerelease.
+// Checks for common indicators: -rc, -alpha, -beta, -dev, -pre
+func bcrIsPrerelease() func(*starlark.Thread, *starlark.Builtin, starlark.Tuple, []starlark.Tuple) (starlark.Value, error) {
+	return func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var version string
+		if err := starlark.UnpackArgs("bcr.is_prerelease", args, kwargs, "version", &version); err != nil {
+			return nil, err
+		}
+
+		return starlark.Bool(bcr.IsPrerelease(version)), nil
 	}
 }

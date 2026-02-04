@@ -105,10 +105,12 @@ func AllBuiltinDocs() []BuiltinDoc {
 		docBcrMetadata(),
 		docBcrSource(),
 		docBcrLatest(),
+		docBcrLatestStable(),
 		docBcrVersions(),
 		docBcrExists(),
 		docBcrVersionExists(),
 		docBcrIsYanked(),
+		docBcrIsPrerelease(),
 
 		// File I/O (DEPRECATED - use fs module)
 		docReadFile(),
@@ -1619,6 +1621,7 @@ func docBcrLatest() BuiltinDoc {
 		},
 		Behavior: []string{
 			"Returns the latest version that is not yanked",
+			"Includes prerelease versions (use bcr.latest_stable to exclude them)",
 			"Raises error if module not found or all versions yanked",
 		},
 		Example: `latest = bcr.latest("rules_go")
@@ -1626,7 +1629,31 @@ print("Latest rules_go:", latest)
 
 # Use in ensure_bazel_dep
 ensure_bazel_dep(name = "rules_go", version = bcr.latest("rules_go"))`,
-		SeeAlso: []string{"bcr.versions", "bcr.is_yanked"},
+		SeeAlso: []string{"bcr.latest_stable", "bcr.versions", "bcr.is_yanked"},
+	}
+}
+
+func docBcrLatestStable() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "bcr.latest_stable",
+		Category:    "module-bcr",
+		Signature:   "bcr.latest_stable(module)",
+		Description: "Get the latest stable (non-prerelease) version of a module",
+		Args: []ArgDoc{
+			{Name: "module", Type: "str", Required: true, Description: "Module name"},
+		},
+		Behavior: []string{
+			"Returns the latest non-yanked, non-prerelease version",
+			"Skips versions with -rc, -alpha, -beta, -dev, -pre suffixes",
+			"Falls back to latest prerelease if no stable version exists",
+			"Raises error if module not found or all versions yanked",
+		},
+		Example: `stable = bcr.latest_stable("rules_go")
+print("Latest stable rules_go:", stable)
+
+# Use for production dependencies
+ensure_bazel_dep(name = "rules_go", version = bcr.latest_stable("rules_go"))`,
+		SeeAlso: []string{"bcr.latest", "bcr.is_prerelease"},
 	}
 }
 
@@ -1716,5 +1743,30 @@ func docBcrIsYanked() BuiltinDoc {
 meta = bcr.metadata("rules_go")
 reason = meta.yanked_versions.get("0.49.0", "")`,
 		SeeAlso: []string{"bcr.latest", "bcr.metadata"},
+	}
+}
+
+func docBcrIsPrerelease() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "bcr.is_prerelease",
+		Category:    "module-bcr",
+		Signature:   "bcr.is_prerelease(version)",
+		Description: "Check if a version string indicates a prerelease",
+		Args: []ArgDoc{
+			{Name: "version", Type: "str", Required: true, Description: "Version string to check"},
+		},
+		Behavior: []string{
+			"Returns True if version contains prerelease indicators",
+			"Checks for: -rc, -alpha, -beta, -dev, -pre",
+			"Does not require BCR client (works offline)",
+		},
+		Example: `# Filter out prereleases
+versions = bcr.versions("rules_go")
+stable_versions = [v for v in versions if not bcr.is_prerelease(v)]
+
+# Check specific version
+if bcr.is_prerelease("1.0.0-rc1"):
+    print("This is a release candidate")`,
+		SeeAlso: []string{"bcr.latest_stable", "bcr.versions"},
 	}
 }

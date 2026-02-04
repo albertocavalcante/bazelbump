@@ -5,6 +5,7 @@ go 1.25
 toolchain go1.25.5
 
 require (
+	github.com/albertocavalcante/go-bcr v0.0.0-20260204170306-7a96b653fa0e
 	github.com/albertocavalcante/starlark-syntax-go v0.0.0-20260204124100-a0f90b3b04d8
 	github.com/gofrs/flock v0.13.0
 	github.com/google/uuid v1.6.0
@@ -14,7 +15,6 @@ require (
 )
 
 require (
-	github.com/albertocavalcante/go-bcr v0.0.0-20260204163957-982d6f58e550 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect

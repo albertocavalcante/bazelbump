@@ -280,6 +280,64 @@ func TestBcrModule_WithMockServer(t *testing.T) {
 		if maintainers.(*starlark.List).Len() != 1 {
 			t.Errorf("expected 1 maintainer, got %d", maintainers.(*starlark.List).Len())
 		}
+
+		latestStable, _ := meta.Attr("latest_stable")
+		if latestStable.(starlark.String) != "0.50.1" {
+			t.Errorf("wrong latest_stable: %v", latestStable)
+		}
+	})
+
+	t.Run("latest_stable", func(t *testing.T) {
+		interp := NewInterpreter(WithBCRClient(client))
+		thread := &starlark.Thread{Name: "test"}
+		globals := interp.globals
+
+		bcrMod := globals["bcr"].(*starlarkstruct.Struct)
+		fn, _ := bcrMod.Attr("latest_stable")
+		result, err := starlark.Call(thread, fn, starlark.Tuple{starlark.String("rules_go")}, nil)
+		if err != nil {
+			t.Fatalf("bcr.latest_stable error: %v", err)
+		}
+		// 0.50.1 is stable (no -rc, -alpha, etc) and not yanked
+		if result.(starlark.String) != "0.50.1" {
+			t.Errorf("expected 0.50.1, got %v", result)
+		}
+	})
+
+	t.Run("is_prerelease", func(t *testing.T) {
+		interp := NewInterpreter(WithBCRClient(client))
+		thread := &starlark.Thread{Name: "test"}
+		globals := interp.globals
+
+		bcrMod := globals["bcr"].(*starlarkstruct.Struct)
+		fn, _ := bcrMod.Attr("is_prerelease")
+
+		// Test stable version
+		result, err := starlark.Call(thread, fn, starlark.Tuple{starlark.String("1.0.0")}, nil)
+		if err != nil {
+			t.Fatalf("bcr.is_prerelease error: %v", err)
+		}
+		if result != starlark.False {
+			t.Errorf("1.0.0 should not be prerelease")
+		}
+
+		// Test prerelease version
+		result, err = starlark.Call(thread, fn, starlark.Tuple{starlark.String("1.0.0-rc1")}, nil)
+		if err != nil {
+			t.Fatalf("bcr.is_prerelease error: %v", err)
+		}
+		if result != starlark.True {
+			t.Errorf("1.0.0-rc1 should be prerelease")
+		}
+
+		// Test alpha
+		result, err = starlark.Call(thread, fn, starlark.Tuple{starlark.String("2.0.0-alpha")}, nil)
+		if err != nil {
+			t.Fatalf("bcr.is_prerelease error: %v", err)
+		}
+		if result != starlark.True {
+			t.Errorf("2.0.0-alpha should be prerelease")
+		}
 	})
 }
 
