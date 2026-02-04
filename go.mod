@@ -5,6 +5,7 @@ go 1.25
 toolchain go1.25.5
 
 require (
+	github.com/albertocavalcante/starlark-syntax-go v0.0.0-20260204124100-a0f90b3b04d8
 	github.com/gofrs/flock v0.13.0
 	github.com/google/uuid v1.6.0
 	github.com/qri-io/starlib v0.5.0
