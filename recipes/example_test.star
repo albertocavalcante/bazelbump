@@ -1,5 +1,5 @@
 # Example test file for bazelbump recipes
-# Note: All builtins return dicts, use dict["field"] access
+# Now using struct (available in skytest) and new assertions!
 
 def test_ensure_load_creates_operation():
     """Test that ensure_load creates an operation dict."""
@@ -53,7 +53,7 @@ def test_edit_step():
     step = edit(id="migrate", operations=ops, depends_on=["scan"])
     assert.eq(step["type"], "edit")
     assert.eq(step["id"], "migrate")
-    assert.eq(len(step["operations"]), 2)
+    assert.len(step["operations"], 2)  # Using new assert.len!
     assert.eq(step["depends_on"], ["scan"])
 
 def test_version_parse():
@@ -122,6 +122,25 @@ def test_verify_step():
     assert.eq(step["command"], "bazel test //...")
     assert.eq(step["allow_failure"], True)
 
+def test_empty_operations():
+    """Test assert.empty with no operations."""
+    step = edit(id="noop", operations=[])
+    assert.empty(step["operations"])  # New assert.empty!
+
+def test_struct_builtin():
+    """Test that struct is available."""
+    s = struct(name="test", value=42)
+    assert.eq(s.name, "test")
+    assert.eq(s.value, 42)
+
+def test_json_module():
+    """Test JSON encode/decode."""
+    data = {"key": "value", "list": [1, 2, 3]}
+    encoded = json.encode(data)
+    decoded = json.decode(encoded)
+    assert.eq(decoded["key"], "value")
+    assert.len(decoded["list"], 3)
+
 def test_operation_tracker():
     """Test the operation tracker helper."""
     tracker = make_operation_tracker()
@@ -132,12 +151,13 @@ def test_operation_tracker():
     tracker["record"]("other_op", x=1)
 
     # Check operations were recorded
-    assert.eq(len(tracker["operations"]), 3)
+    assert.len(tracker["operations"], 3)  # New assert.len!
 
     # Filter by type
     test_ops = tracker["get_by_type"]("test_op")
-    assert.eq(len(test_ops), 2)
+    assert.len(test_ops, 2)
+    assert.not_empty(test_ops)  # New assert.not_empty!
 
     # Clear
     tracker["clear"]()
-    assert.eq(len(tracker["operations"]), 0)
+    assert.empty(tracker["operations"])  # New assert.empty!
