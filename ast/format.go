@@ -74,13 +74,17 @@ func formatExpr(buf *strings.Builder, expr bzl.Expr, indent int) {
 		formatCall(buf, e, indentStr)
 
 	case *bzl.StringExpr:
-		if e.TripleQuote {
+		// Use Token if available (preserves original escaping)
+		// Otherwise, escape the Value properly
+		if e.Token != "" {
+			buf.WriteString(e.Token)
+		} else if e.TripleQuote {
 			buf.WriteString(`"""`)
-			buf.WriteString(e.Value)
+			buf.WriteString(escapeString(e.Value, true))
 			buf.WriteString(`"""`)
 		} else {
 			buf.WriteString(`"`)
-			buf.WriteString(e.Value)
+			buf.WriteString(escapeString(e.Value, false))
 			buf.WriteString(`"`)
 		}
 
@@ -129,6 +133,52 @@ func formatExpr(buf *strings.Builder, expr bzl.Expr, indent int) {
 		buf.WriteString("[")
 		formatExpr(buf, e.Y, 0)
 		buf.WriteString("]")
+
+	case *bzl.ParenExpr:
+		buf.WriteString("(")
+		formatExpr(buf, e.X, 0)
+		buf.WriteString(")")
+
+	case *bzl.TupleExpr:
+		if !e.NoBrackets {
+			buf.WriteString("(")
+		}
+		for i, elem := range e.List {
+			if i > 0 {
+				buf.WriteString(", ")
+			}
+			formatExpr(buf, elem, 0)
+		}
+		if !e.NoBrackets {
+			buf.WriteString(")")
+		}
+
+	case *bzl.Comprehension:
+		if e.Curly {
+			buf.WriteString("{")
+		} else {
+			buf.WriteString("[")
+		}
+		formatExpr(buf, e.Body, 0)
+		for _, clause := range e.Clauses {
+			buf.WriteString(" ")
+			formatExpr(buf, clause, 0)
+		}
+		if e.Curly {
+			buf.WriteString("}")
+		} else {
+			buf.WriteString("]")
+		}
+
+	case *bzl.ForClause:
+		buf.WriteString("for ")
+		formatExpr(buf, e.Vars, 0)
+		buf.WriteString(" in ")
+		formatExpr(buf, e.X, 0)
+
+	case *bzl.IfClause:
+		buf.WriteString("if ")
+		formatExpr(buf, e.Cond, 0)
 
 	case *bzl.CommentBlock:
 		writeComments(buf, e.Comment().Before, indentStr)
@@ -286,6 +336,36 @@ func formatDict(buf *strings.Builder, dict *bzl.DictExpr, indent int) {
 	}
 
 	buf.WriteString("}")
+}
+
+// escapeString escapes a string value for Starlark output.
+func escapeString(s string, triple bool) string {
+	var buf strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\\':
+			buf.WriteString(`\\`)
+		case '\n':
+			if triple {
+				buf.WriteRune(r)
+			} else {
+				buf.WriteString(`\n`)
+			}
+		case '\r':
+			buf.WriteString(`\r`)
+		case '\t':
+			buf.WriteString(`\t`)
+		case '"':
+			if triple {
+				buf.WriteRune(r)
+			} else {
+				buf.WriteString(`\"`)
+			}
+		default:
+			buf.WriteRune(r)
+		}
+	}
+	return buf.String()
 }
 
 // SortLoadArgs sorts the symbols in a load statement alphabetically.
