@@ -12,13 +12,12 @@ import (
 )
 
 // PreludeContent contains the Starlark prelude for recipe testing.
-// Note: Uses dicts instead of structs since vanilla Starlark doesn't have struct.
-// Operations return dicts describing the operation; no global state tracking.
+// Uses struct builtin (available in skytest) for clean attribute access.
 const PreludeContent = `# Auto-generated prelude for bazelbump recipe tests
 # This provides mock implementations of bazelbump builtins for testing.
 #
-# Note: All functions return dicts. Access fields with result["field"].
-# Operations return a dict describing what they would do.
+# Uses struct for attribute access: result.field instead of result["field"]
+# Requires skytest with struct builtin (PR #37+)
 
 # =============================================================================
 # Step builtins
@@ -26,57 +25,57 @@ const PreludeContent = `# Auto-generated prelude for bazelbump recipe tests
 
 def recipe(name, version, steps, description=None, min_bazel_version=None, max_bazel_version=None, requires=None, on_failure="rollback"):
     """Define a migration recipe."""
-    return {
-        "name": name,
-        "version": version,
-        "steps": steps,
-        "description": description,
-        "min_bazel_version": min_bazel_version,
-        "max_bazel_version": max_bazel_version,
-        "requires": requires or [],
-        "on_failure": on_failure,
-    }
+    return struct(
+        name=name,
+        version=version,
+        steps=steps,
+        description=description,
+        min_bazel_version=min_bazel_version,
+        max_bazel_version=max_bazel_version,
+        requires=requires or [],
+        on_failure=on_failure,
+    )
 
 def scan(id, name=None, description=None, files=None, patterns=None, impl=None):
     """Scan files for patterns and produce matches."""
-    return {
-        "type": "scan",
-        "id": id,
-        "name": name or id,
-        "description": description,
-        "files": files or [],
-        "patterns": patterns or [],
-        "impl": impl,
+    return struct(
+        type="scan",
+        id=id,
+        name=name or id,
+        description=description,
+        files=files or [],
+        patterns=patterns or [],
+        impl=impl,
         # Mock scan result fields
-        "matches": [],
-        "count": 0,
-        "rules": [],
-        "families": [],
-    }
+        matches=[],
+        count=0,
+        rules=[],
+        families=[],
+    )
 
 def edit(id, operations, name=None, description=None, depends_on=None):
     """Apply transformations to files."""
-    return {
-        "type": "edit",
-        "id": id,
-        "name": name or id,
-        "description": description,
-        "operations": operations if type(operations) == "list" else [],
-        "depends_on": depends_on or [],
-    }
+    return struct(
+        type="edit",
+        id=id,
+        name=name or id,
+        description=description,
+        operations=operations if type(operations) == "list" else [],
+        depends_on=depends_on or [],
+    )
 
 def verify(id, command, name=None, description=None, depends_on=None, timeout="5m", allow_failure=False):
     """Run a verification command."""
-    return {
-        "type": "verify",
-        "id": id,
-        "name": name or id,
-        "description": description,
-        "command": command,
-        "depends_on": depends_on or [],
-        "timeout": timeout,
-        "allow_failure": allow_failure,
-    }
+    return struct(
+        type="verify",
+        id=id,
+        name=name or id,
+        description=description,
+        command=command,
+        depends_on=depends_on or [],
+        timeout=timeout,
+        allow_failure=allow_failure,
+    )
 
 # =============================================================================
 # Operation builtins - BUILD files
@@ -84,15 +83,15 @@ def verify(id, command, name=None, description=None, depends_on=None, timeout="5
 
 def ensure_load(rule, load_from, file=None):
     """Add load() statement for a Bazel rule."""
-    return {"type": "ensure_load", "rule": rule, "load_from": load_from, "file": file}
+    return struct(type="ensure_load", rule=rule, load_from=load_from, file=file)
 
 def ensure_load_for_detected(detected, mapping=None):
     """Add load() statements for all rules found by a scan."""
-    return {"type": "ensure_load_for_detected", "detected": detected, "mapping": mapping}
+    return struct(type="ensure_load_for_detected", detected=detected, mapping=mapping)
 
 def remove_load(rule, file=None):
     """Remove a symbol from load() statements."""
-    return {"type": "remove_load", "rule": rule, "file": file}
+    return struct(type="remove_load", rule=rule, file=file)
 
 # =============================================================================
 # Operation builtins - MODULE.bazel
@@ -100,15 +99,15 @@ def remove_load(rule, file=None):
 
 def ensure_bazel_dep(name, version, dev_dependency=False):
     """Add bazel_dep() entry to MODULE.bazel."""
-    return {"type": "ensure_bazel_dep", "name": name, "version": version, "dev_dependency": dev_dependency}
+    return struct(type="ensure_bazel_dep", name=name, version=version, dev_dependency=dev_dependency)
 
 def update_bazel_dep(name, version):
     """Update version of an existing bazel_dep()."""
-    return {"type": "update_bazel_dep", "name": name, "version": version}
+    return struct(type="update_bazel_dep", name=name, version=version)
 
 def remove_bazel_dep(name):
     """Remove bazel_dep() from MODULE.bazel."""
-    return {"type": "remove_bazel_dep", "name": name}
+    return struct(type="remove_bazel_dep", name=name)
 
 # =============================================================================
 # Operation builtins - .bazelrc
@@ -116,15 +115,15 @@ def remove_bazel_dep(name):
 
 def remove_flag(flag, file=".bazelrc", config=None):
     """Remove flag from .bazelrc."""
-    return {"type": "remove_flag", "flag": flag, "file": file, "config": config}
+    return struct(type="remove_flag", flag=flag, file=file, config=config)
 
 def replace_flag(old, new, file=".bazelrc"):
     """Replace one flag with another in .bazelrc."""
-    return {"type": "replace_flag", "old": old, "new": new, "file": file}
+    return struct(type="replace_flag", old=old, new=new, file=file)
 
 def ensure_flag(flag, value=None, config="build", file=".bazelrc"):
     """Ensure a flag exists in .bazelrc."""
-    return {"type": "ensure_flag", "flag": flag, "value": value, "config": config, "file": file}
+    return struct(type="ensure_flag", flag=flag, value=value, config=config, file=file)
 
 # =============================================================================
 # Operation builtins - Generic
@@ -132,30 +131,30 @@ def ensure_flag(flag, value=None, config="build", file=".bazelrc"):
 
 def replace_text(old, new, files, regex=False):
     """Replace text in files."""
-    return {"type": "replace_text", "old": old, "new": new, "files": files, "regex": regex}
+    return struct(type="replace_text", old=old, new=new, files=files, regex=regex)
 
 def copy_file(src, dst):
     """Copy a file."""
-    return {"type": "copy_file", "src": src, "dst": dst}
+    return struct(type="copy_file", src=src, dst=dst)
 
 def delete_file(path):
     """Delete a file."""
-    return {"type": "delete_file", "path": path}
+    return struct(type="delete_file", path=path)
 
 def run_command(command, description=None, timeout="5m", allow_failure=False, echo=False, capture=False, env=None, working_dir=None, shell="sh"):
     """Execute a shell command."""
-    return {
-        "type": "run_command",
-        "command": command,
-        "description": description,
-        "timeout": timeout,
-        "allow_failure": allow_failure,
-        "echo": echo,
-        "capture": capture,
-        "env": env,
-        "working_dir": working_dir,
-        "shell": shell,
-    }
+    return struct(
+        type="run_command",
+        command=command,
+        description=description,
+        timeout=timeout,
+        allow_failure=allow_failure,
+        echo=echo,
+        capture=capture,
+        env=env,
+        working_dir=working_dir,
+        shell=shell,
+    )
 
 # =============================================================================
 # Utility builtins
@@ -163,15 +162,15 @@ def run_command(command, description=None, timeout="5m", allow_failure=False, ec
 
 def fail(msg):
     """Stop execution with an error (in tests, just returns the operation)."""
-    return {"type": "fail", "msg": msg}
+    return struct(type="fail", msg=msg)
 
 def warn(msg):
     """Print a warning but continue."""
-    return {"type": "warn", "msg": msg}
+    return struct(type="warn", msg=msg)
 
 def skip(msg):
     """Skip the current step."""
-    return {"type": "skip", "msg": msg}
+    return struct(type="skip", msg=msg)
 
 # =============================================================================
 # File I/O builtins (mock implementations)
@@ -197,10 +196,10 @@ def list_dir(path, recursive=False):
 
 def parse_build_file(path):
     """Parse a BUILD file and return structure (mock)."""
-    return {
-        "rules": [],
-        "loads": [],
-    }
+    return struct(
+        rules=[],
+        loads=[],
+    )
 
 # =============================================================================
 # Context builtins (mock implementations)
@@ -208,12 +207,12 @@ def parse_build_file(path):
 
 def get_project_context():
     """Get project context information (mock)."""
-    return {
-        "root": ".",
-        "bazel_version": "8.0.0",
-        "use_bzlmod": True,
-        "workspace_name": "test_workspace",
-    }
+    return struct(
+        root=".",
+        bazel_version="8.0.0",
+        use_bzlmod=True,
+        workspace_name="test_workspace",
+    )
 
 def get_bazel_deps():
     """Get list of bazel_dep() entries from MODULE.bazel (mock)."""
@@ -240,34 +239,34 @@ def parse_version(s):
         prerelease = patch_str[idx+1:]
         patch_str = patch_str[:idx]
     patch = int(patch_str) if patch_str.isdigit() else 0
-    return {
-        "major": major,
-        "minor": minor,
-        "patch": patch,
-        "prerelease": prerelease,
-        "string": s,
-    }
+    return struct(
+        major=major,
+        minor=minor,
+        patch=patch,
+        prerelease=prerelease,
+        string=s,
+    )
 
 def version_compare(v1, v2):
     """Compare two version strings. Returns -1, 0, or 1."""
     p1 = parse_version(v1)
     p2 = parse_version(v2)
 
-    if p1["major"] != p2["major"]:
-        return -1 if p1["major"] < p2["major"] else 1
-    if p1["minor"] != p2["minor"]:
-        return -1 if p1["minor"] < p2["minor"] else 1
-    if p1["patch"] != p2["patch"]:
-        return -1 if p1["patch"] < p2["patch"] else 1
+    if p1.major != p2.major:
+        return -1 if p1.major < p2.major else 1
+    if p1.minor != p2.minor:
+        return -1 if p1.minor < p2.minor else 1
+    if p1.patch != p2.patch:
+        return -1 if p1.patch < p2.patch else 1
 
     # Prerelease versions are less than release versions
-    if p1["prerelease"] and not p2["prerelease"]:
+    if p1.prerelease and not p2.prerelease:
         return -1
-    if not p1["prerelease"] and p2["prerelease"]:
+    if not p1.prerelease and p2.prerelease:
         return 1
-    if p1["prerelease"] < p2["prerelease"]:
+    if p1.prerelease < p2.prerelease:
         return -1
-    if p1["prerelease"] > p2["prerelease"]:
+    if p1.prerelease > p2.prerelease:
         return 1
 
     return 0
@@ -285,33 +284,33 @@ def version_in_range(version, min_ver, max_ver):
     return version_compare(version, min_ver) >= 0 and version_compare(version, max_ver) <= 0
 
 # =============================================================================
-# Module namespaces (as dicts with callable values)
+# Module namespaces (as structs with callable attributes)
 # =============================================================================
 
 # project module
-project = {
-    "context": get_project_context,
-    "deps": get_bazel_deps,
-    "compatibility": get_bazel_compatibility,
-}
+project = struct(
+    context=get_project_context,
+    deps=get_bazel_deps,
+    compatibility=get_bazel_compatibility,
+)
 
 # version module
-version = {
-    "parse": parse_version,
-    "compare": version_compare,
-    "matches": version_matches,
-    "at_least": version_at_least,
-    "in_range": version_in_range,
-}
+version = struct(
+    parse=parse_version,
+    compare=version_compare,
+    matches=version_matches,
+    at_least=version_at_least,
+    in_range=version_in_range,
+)
 
 # fs module
-fs = {
-    "read": read_file,
-    "exists": file_exists,
-    "glob": glob_files,
-    "list_dir": list_dir,
-    "parse_build": parse_build_file,
-}
+fs = struct(
+    read=read_file,
+    exists=file_exists,
+    glob=glob_files,
+    list_dir=list_dir,
+    parse_build=parse_build_file,
+)
 
 # =============================================================================
 # Test helpers - for tracking operations in tests
@@ -320,7 +319,7 @@ fs = {
 def make_operation_tracker():
     """Create a fresh operation tracker for use in tests.
 
-    Returns a dict with:
+    Returns a struct with:
     - operations: list to store operations
     - record: function to record an operation
     - clear: function to clear operations
@@ -328,14 +327,13 @@ def make_operation_tracker():
 
     Usage in tests:
         tracker = make_operation_tracker()
-        # ... call operations that use tracker.record() ...
-        assert.eq(len(tracker["operations"]), 2)
+        tracker.record("ensure_load", rule="cc_library")
+        assert.len(tracker.operations, 1)
     """
     ops = []
 
     def record(op_type, **kwargs):
-        op = {"type": op_type}
-        op.update(kwargs)
+        op = struct(type=op_type, **kwargs)
         ops.append(op)
         return op
 
@@ -344,14 +342,14 @@ def make_operation_tracker():
             ops.pop()
 
     def get_by_type(op_type):
-        return [op for op in ops if op["type"] == op_type]
+        return [op for op in ops if op.type == op_type]
 
-    return {
-        "operations": ops,
-        "record": record,
-        "clear": clear,
-        "get_by_type": get_by_type,
-    }
+    return struct(
+        operations=ops,
+        record=record,
+        clear=clear,
+        get_by_type=get_by_type,
+    )
 `
 
 // Generate returns the Starlark prelude content for recipe testing.
