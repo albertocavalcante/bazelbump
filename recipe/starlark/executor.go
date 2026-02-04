@@ -38,6 +38,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/albertocavalcante/bazelbump/ast"
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
 )
@@ -978,6 +979,7 @@ func (e *Executor) opRemoveLoad(ctx *Context, op *RemoveLoadOp) ([]*FileChange, 
 }
 
 // removeLoadFromFile removes a rule from load statements in a file.
+// Uses AST-based transformation to correctly handle multi-line load statements.
 func (e *Executor) removeLoadFromFile(ctx *Context, file, rule string) (*FileChange, error) {
 	content, err := os.ReadFile(file)
 	if err != nil {
@@ -987,38 +989,32 @@ func (e *Executor) removeLoadFromFile(ctx *Context, file, rule string) (*FileCha
 		return nil, err
 	}
 
-	lines := strings.Split(string(content), "\n")
-	var newLines []string
-	changed := false
-
-	for _, line := range lines {
-		if strings.Contains(line, "load(") && strings.Contains(line, fmt.Sprintf(`"%s"`, rule)) {
-			// Check if this is the only symbol in the load
-			re := regexp.MustCompile(`"(\w+)"`)
-			matches := re.FindAllStringSubmatch(line, -1)
-			if len(matches) <= 2 { // Load path + one symbol
-				// Remove the entire load statement
-				changed = true
-				continue
-			}
-			// Remove just this symbol from the load
-			newLine := regexp.MustCompile(fmt.Sprintf(`,?\s*"%s"\s*,?`, regexp.QuoteMeta(rule))).ReplaceAllString(line, "")
-			// Clean up double commas
-			newLine = strings.ReplaceAll(newLine, ",,", ",")
-			newLine = strings.ReplaceAll(newLine, "(,", "(")
-			newLine = strings.ReplaceAll(newLine, ",)", ")")
-			newLines = append(newLines, newLine)
-			changed = true
-		} else {
-			newLines = append(newLines, line)
-		}
-	}
-
-	if !changed {
+	// Parse with AST
+	f, err := ast.ParseFileContent(file, content)
+	if err != nil {
+		// If AST parsing fails, skip this file
 		return nil, nil
 	}
 
-	newContent := []byte(strings.Join(newLines, "\n"))
+	// Apply AST operation - RemoveLoad removes from all modules that have this symbol
+	modified, err := ast.RemoveLoad(f, ast.RemoveLoadOptions{
+		Symbols: []string{rule},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("remove_load in %s: %w", file, err)
+	}
+
+	if !modified {
+		return nil, nil // Symbol not found in any load
+	}
+
+	// Format output
+	newContent := f.Format()
+
+	// Validate output is valid Starlark (re-parse to check syntax)
+	if _, err := ast.ParseFileContent(file, newContent); err != nil {
+		return nil, fmt.Errorf("invalid output for %s: %w", file, err)
+	}
 
 	change := &FileChange{
 		Path:        file,
@@ -1041,6 +1037,7 @@ func (e *Executor) removeLoadFromFile(ctx *Context, file, rule string) (*FileCha
 }
 
 // ensureLoadInFile adds a load statement to a file if needed.
+// Uses AST-based transformation to correctly handle multi-line load statements.
 func (e *Executor) ensureLoadInFile(ctx *Context, file, rule, loadFrom string) (*FileChange, error) {
 	content, err := os.ReadFile(file)
 	if err != nil {
@@ -1050,31 +1047,41 @@ func (e *Executor) ensureLoadInFile(ctx *Context, file, rule, loadFrom string) (
 		return nil, err
 	}
 
-	// Check if load already exists
-	loadPattern := fmt.Sprintf(`load\s*\(\s*"%s"[^)]*"%s"`, regexp.QuoteMeta(loadFrom), regexp.QuoteMeta(rule))
-	if matched, _ := regexp.MatchString(loadPattern, string(content)); matched {
-		return nil, nil // Already has load
-	}
-
-	// Check if rule is actually used in this file
+	// Check if rule is actually used in this file (quick pre-check)
 	rulePattern := fmt.Sprintf(`\b%s\s*\(`, regexp.QuoteMeta(rule))
 	if matched, _ := regexp.MatchString(rulePattern, string(content)); !matched {
 		return nil, nil // Rule not used
 	}
 
-	lines := strings.Split(string(content), "\n")
-	insertIdx := e.findLoadInsertPoint(lines)
+	// Parse with AST
+	f, err := ast.ParseFileContent(file, content)
+	if err != nil {
+		// If AST parsing fails, skip this file rather than breaking the recipe
+		// This can happen with files that have syntax errors
+		return nil, nil
+	}
 
-	// Create load statement
-	loadStmt := fmt.Sprintf(`load("%s", "%s")`, loadFrom, rule)
+	// Apply AST operation
+	modified, err := ast.EnsureLoad(f, ast.EnsureLoadOptions{
+		Module:   loadFrom,
+		Symbols:  []string{rule},
+		Position: ast.LoadPositionTop,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ensure_load in %s: %w", file, err)
+	}
 
-	// Insert
-	newLines := make([]string, 0, len(lines)+1)
-	newLines = append(newLines, lines[:insertIdx]...)
-	newLines = append(newLines, loadStmt)
-	newLines = append(newLines, lines[insertIdx:]...)
+	if !modified {
+		return nil, nil // Already has the load
+	}
 
-	newContent := []byte(strings.Join(newLines, "\n"))
+	// Format output
+	newContent := f.Format()
+
+	// Validate output is valid Starlark (re-parse to check syntax)
+	if _, err := ast.ParseFileContent(file, newContent); err != nil {
+		return nil, fmt.Errorf("invalid output for %s: %w", file, err)
+	}
 
 	change := &FileChange{
 		Path:        file,
@@ -1097,6 +1104,7 @@ func (e *Executor) ensureLoadInFile(ctx *Context, file, rule, loadFrom string) (
 }
 
 // ensureLoadsForMatches adds load statements for all matches in a file.
+// Uses AST-based transformation to correctly handle multi-line load statements.
 func (e *Executor) ensureLoadsForMatches(ctx *Context, file string, matches []Match) (*FileChange, error) {
 	content, err := os.ReadFile(file)
 	if err != nil {
@@ -1116,24 +1124,16 @@ func (e *Executor) ensureLoadsForMatches(ctx *Context, file string, matches []Ma
 		return nil, nil
 	}
 
-	lines := strings.Split(string(content), "\n")
-	insertIdx := e.findLoadInsertPoint(lines)
+	// Parse with AST
+	f, err := ast.ParseFileContent(file, content)
+	if err != nil {
+		// If AST parsing fails, skip this file
+		return nil, nil
+	}
 
-	// Generate load statements
-	var newLoads []string
+	// Apply AST operations for each needed load
+	anyModified := false
 	for loadPath, rules := range neededLoads {
-		// Check if load already exists for this path
-		loadExists := false
-		for _, line := range lines {
-			if strings.Contains(line, loadPath) {
-				loadExists = true
-				break
-			}
-		}
-		if loadExists {
-			continue
-		}
-
 		// Deduplicate rules
 		seen := make(map[string]bool)
 		var unique []string
@@ -1145,29 +1145,30 @@ func (e *Executor) ensureLoadsForMatches(ctx *Context, file string, matches []Ma
 		}
 		sort.Strings(unique)
 
-		// Create load statement
-		quotedRules := make([]string, len(unique))
-		for i, r := range unique {
-			quotedRules[i] = fmt.Sprintf(`"%s"`, r)
+		modified, err := ast.EnsureLoad(f, ast.EnsureLoadOptions{
+			Module:   loadPath,
+			Symbols:  unique,
+			Position: ast.LoadPositionTop,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("ensure_load in %s: %w", file, err)
 		}
-		load := fmt.Sprintf(`load("%s", %s)`, loadPath, strings.Join(quotedRules, ", "))
-		newLoads = append(newLoads, load)
+		if modified {
+			anyModified = true
+		}
 	}
 
-	if len(newLoads) == 0 {
+	if !anyModified {
 		return nil, nil
 	}
 
-	// Sort for deterministic output
-	sort.Strings(newLoads)
+	// Format output
+	newContent := f.Format()
 
-	// Insert load statements
-	newLines := make([]string, 0, len(lines)+len(newLoads))
-	newLines = append(newLines, lines[:insertIdx]...)
-	newLines = append(newLines, newLoads...)
-	newLines = append(newLines, lines[insertIdx:]...)
-
-	newContent := []byte(strings.Join(newLines, "\n"))
+	// Validate output is valid Starlark (re-parse to check syntax)
+	if _, err := ast.ParseFileContent(file, newContent); err != nil {
+		return nil, fmt.Errorf("invalid output for %s: %w", file, err)
+	}
 
 	change := &FileChange{
 		Path:        file,
@@ -1187,23 +1188,6 @@ func (e *Executor) ensureLoadsForMatches(ctx *Context, file string, matches []Ma
 	}
 
 	return change, nil
-}
-
-// findLoadInsertPoint finds where to insert new load statements.
-func (e *Executor) findLoadInsertPoint(lines []string) int {
-	insertIdx := 0
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "load(") {
-			insertIdx = i + 1
-		} else if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-			if insertIdx == 0 {
-				insertIdx = i
-			}
-			break
-		}
-	}
-	return insertIdx
 }
 
 // getRuleLoadPath returns the load path for a known rule.
