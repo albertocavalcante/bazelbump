@@ -153,6 +153,18 @@ func (i *Interpreter) makeBuiltins() starlark.StringDict {
 		"file_exists": starlark.NewBuiltin("file_exists", i.builtinFileExists),
 		"list_dir":    starlark.NewBuiltin("list_dir", i.builtinListDir),
 		"glob":        starlark.NewBuiltin("glob", i.builtinGlob),
+
+		// Project context builtins
+		"get_project_context":     starlark.NewBuiltin("get_project_context", i.builtinGetProjectContext),
+		"get_bazel_deps":          starlark.NewBuiltin("get_bazel_deps", i.builtinGetBazelDeps),
+		"get_bazel_compatibility": starlark.NewBuiltin("get_bazel_compatibility", i.builtinGetBazelCompatibility),
+
+		// Version builtins
+		"version_matches":  starlark.NewBuiltin("version_matches", builtinVersionMatches),
+		"version_compare":  starlark.NewBuiltin("version_compare", builtinVersionCompare),
+		"parse_version":    starlark.NewBuiltin("parse_version", builtinParseVersion),
+		"version_at_least": starlark.NewBuiltin("version_at_least", builtinVersionAtLeast),
+		"version_in_range": starlark.NewBuiltin("version_in_range", builtinVersionInRange),
 	}
 
 	// Add the starlib regex module as a predeclared global.
