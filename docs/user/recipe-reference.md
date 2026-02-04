@@ -2,6 +2,30 @@
 
 Complete API reference for bazelbump Starlark recipes.
 
+> **Note:** As of v1.x, utility functions are available in namespaced modules (`project.*`, `version.*`, `fs.*`, `flags.*`). The old global function names are deprecated and will be removed in v2.0.
+
+## Table of Contents
+
+- [Core Functions](#core-functions)
+  - [recipe()](#recipe)
+  - [scan()](#scan)
+  - [edit()](#edit)
+  - [verify()](#verify)
+- [Modules (New API)](#modules-new-api)
+  - [project module](#project-module)
+  - [version module](#version-module)
+  - [fs module](#fs-module)
+  - [flags module](#flags-module)
+- [Operations](#operations)
+  - [BUILD File Operations](#build-file-operations)
+  - [MODULE.bazel Operations](#modulebazel-operations)
+  - [.bazelrc Operations](#bazelrc-operations)
+  - [Generic Operations](#generic-operations)
+- [Error Handling](#error-handling-functions)
+- [Deprecated Functions](#deprecated-functions-removed-in-v20)
+
+---
+
 ## recipe()
 
 Defines a recipe. Must be called exactly once per file.
@@ -598,7 +622,601 @@ delete_file("*.bak")  # Glob pattern
 
 ---
 
+## Modules (New API)
+
+The new namespaced module API groups related functions together for better discoverability and reduced namespace pollution. These are the recommended APIs going forward.
+
+### project module
+
+Functions for accessing project context information.
+
+#### project.context()
+
+Get project context information (memoized per run).
+
+```starlark
+project.context() -> struct
+```
+
+**Returns:** A struct with these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `root` | string | Project root directory |
+| `bazel_version` | string | Bazel version from .bazelversion (empty if not found) |
+| `use_bzlmod` | bool | True if MODULE.bazel exists |
+| `use_workspace` | bool | True if WORKSPACE exists |
+| `module_name` | string | Module name from MODULE.bazel |
+| `module_version` | string | Module version from MODULE.bazel |
+
+**Example:**
+
+```starlark
+ctx = project.context()
+if ctx.use_bzlmod:
+    print("Using bzlmod at", ctx.root)
+if ctx.bazel_version:
+    print("Bazel version:", ctx.bazel_version)
+```
+
+---
+
+#### project.deps()
+
+Get list of bazel_dep() entries from MODULE.bazel.
+
+```starlark
+project.deps() -> list[dict]
+```
+
+**Returns:** List of dicts, each with:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `name` | string | Module name |
+| `version` | string | Module version |
+| `repo_name` | string | Optional repo_name override (empty if not set) |
+| `dev_dependency` | bool | True if this is a dev dependency |
+
+**Example:**
+
+```starlark
+deps = project.deps()
+for dep in deps:
+    print(dep["name"], "at version", dep["version"])
+    if dep["dev_dependency"]:
+        print("  (dev dependency)")
+```
+
+---
+
+#### project.compatibility()
+
+Get bazel_compatibility constraints from MODULE.bazel.
+
+```starlark
+project.compatibility() -> list[string]
+```
+
+**Returns:** List of constraint strings (BCR format), e.g., `[">=6.4.0", "<=9.0.0", "-7.1.0"]`
+
+**Example:**
+
+```starlark
+compat = project.compatibility()
+ctx = project.context()
+if ctx.bazel_version and not version.matches(ctx.bazel_version, compat):
+    fail("Project Bazel version doesn't match compatibility constraints")
+```
+
+---
+
+### version module
+
+Functions for version parsing and comparison.
+
+#### version.parse()
+
+Parse a version string into its components.
+
+```starlark
+version.parse(s) -> struct
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `s` | string | Yes | Version string to parse |
+
+**Returns:** A struct with these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `major` | int | Major version number |
+| `minor` | int | Minor version number |
+| `patch` | int | Patch version number |
+| `prerelease` | string | Prerelease suffix (empty if stable) |
+| `string` | string | Original version string |
+
+**Example:**
+
+```starlark
+v = version.parse("7.0.0-rc1")
+v.major       # 7
+v.minor       # 0
+v.patch       # 0
+v.prerelease  # "rc1"
+
+# Check major version
+ctx = project.context()
+if version.parse(ctx.bazel_version).major >= 8:
+    print("Running on Bazel 8+")
+```
+
+---
+
+#### version.compare()
+
+Compare two version strings.
+
+```starlark
+version.compare(v1, v2) -> int
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `v1` | string | Yes | First version string |
+| `v2` | string | Yes | Second version string |
+
+**Returns:**
+
+| Value | Meaning |
+|-------|---------|
+| `-1` | v1 < v2 |
+| `0` | v1 == v2 |
+| `1` | v1 > v2 |
+
+**Example:**
+
+```starlark
+version.compare("7.0.0", "8.0.0")  # -1
+version.compare("8.0.0", "7.0.0")  # 1
+version.compare("7.0.0", "7.0.0")  # 0
+```
+
+---
+
+#### version.matches()
+
+Check if a version satisfies BCR-style constraints.
+
+```starlark
+version.matches(version, constraints) -> bool
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `version` | string | Yes | Version string to check |
+| `constraints` | list[string] | Yes | List of constraint strings |
+
+**Constraint operators:**
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `>=` | Greater than or equal | `>=6.4.0` |
+| `<=` | Less than or equal | `<=9.0.0` |
+| `>` | Greater than | `>7.0.0` |
+| `<` | Less than | `<8.0.0` |
+| `==` | Exactly equal | `==7.0.0` |
+| `!=` | Not equal | `!=7.1.0` |
+| `-` | Exclude version | `-7.1.0` |
+
+**Example:**
+
+```starlark
+version.matches("7.7.1", [">=6.4.0", "<=9.0.0"])  # True
+version.matches("7.1.0", [">=6.4.0", "-7.1.0"])   # False (excluded)
+version.matches("5.0.0", [">=6.4.0"])             # False
+```
+
+---
+
+#### version.at_least()
+
+Check if version >= minimum.
+
+```starlark
+version.at_least(version, minimum) -> bool
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `version` | string | Yes | Version string to check |
+| `minimum` | string | Yes | Minimum required version |
+
+**Example:**
+
+```starlark
+ctx = project.context()
+if not version.at_least(ctx.bazel_version, "8.0.0"):
+    fail("This recipe requires Bazel 8.0.0 or later")
+```
+
+---
+
+#### version.in_range()
+
+Check if min <= version <= max.
+
+```starlark
+version.in_range(version, min, max) -> bool
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `version` | string | Yes | Version string to check |
+| `min` | string | Yes | Minimum version (inclusive) |
+| `max` | string | Yes | Maximum version (inclusive) |
+
+**Example:**
+
+```starlark
+ctx = project.context()
+
+# Check if running on Bazel 7.x
+if version.in_range(ctx.bazel_version, "7.0.0", "7.99.99"):
+    print("Running on Bazel 7.x")
+```
+
+---
+
+### fs module
+
+Functions for filesystem operations (sandboxed to project directory).
+
+#### fs.read()
+
+Read file contents as string.
+
+```starlark
+fs.read(path, default=None) -> string
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Path to the file (relative to project) |
+| `default` | any | No | Default value if file doesn't exist |
+
+**Example:**
+
+```starlark
+content = fs.read("MODULE.bazel")
+version = fs.read(".bazel-version", default="7.0.0")
+```
+
+---
+
+#### fs.exists()
+
+Check if file or directory exists.
+
+```starlark
+fs.exists(path) -> bool
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Path to check (relative to project) |
+
+**Example:**
+
+```starlark
+if fs.exists("MODULE.bazel"):
+    # Running with bzlmod
+    pass
+```
+
+---
+
+#### fs.glob()
+
+Find files matching a glob pattern.
+
+```starlark
+fs.glob(pattern, exclude=[]) -> list[string]
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pattern` | string | Yes | Glob pattern (supports `**`) |
+| `exclude` | list[string] | No | Patterns to exclude |
+
+**Example:**
+
+```starlark
+build_files = fs.glob("**/BUILD")
+star_files = fs.glob("**/*.star", exclude=["**/test_*.star"])
+```
+
+---
+
+#### fs.list_dir()
+
+List directory contents.
+
+```starlark
+fs.list_dir(path, recursive=False) -> list[string]
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Directory path (relative to project) |
+| `recursive` | bool | No | Include subdirectories (default: False) |
+
+**Example:**
+
+```starlark
+entries = fs.list_dir("src")
+all_files = fs.list_dir(".", recursive=True)
+```
+
+---
+
+#### fs.parse_build()
+
+Parse a BUILD file and return structure.
+
+```starlark
+fs.parse_build(path) -> BuildFile
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Path to BUILD file |
+
+**Returns:** A BuildFile object with these methods:
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `rules(kind=None)` | list[Rule] | Rules, optionally filtered by kind (supports `cc_*` wildcards) |
+| `loads()` | list[Load] | Load statements |
+
+**Example:**
+
+```starlark
+bf = fs.parse_build("src/BUILD")
+for rule in bf.rules("cc_*"):
+    print(rule.name, rule.kind)
+for load in bf.loads():
+    print(load.path, load.symbols)
+```
+
+---
+
+### flags module
+
+Functions for querying the Bazel flag database. Requires flag database to be loaded (via `--flagdb-path` or equivalent).
+
+#### flags.exists()
+
+Check if a flag exists in the given Bazel version.
+
+```starlark
+flags.exists(name, version) -> bool
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Flag name (without leading `--`) |
+| `version` | string | Yes | Bazel version to check |
+
+**Example:**
+
+```starlark
+if flags.exists("incompatible_enable_cc_toolchain_resolution", "8.0.0"):
+    print("Flag exists in Bazel 8.0.0")
+```
+
+---
+
+#### flags.get()
+
+Get detailed information about a flag.
+
+```starlark
+flags.get(name, version) -> struct | None
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Flag name (without leading `--`) |
+| `version` | string | Yes | Bazel version to check |
+
+**Returns:** A struct with flag details or `None` if not found:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Flag name |
+| `short` | string | Short description |
+| `type` | string | Flag type |
+| `default` | string | Default value |
+| `description` | string | Full description |
+| `tags` | list[string] | Tags (e.g., "deprecated", "experimental") |
+| `sources` | list[string] | Commands where flag is available |
+| `is_deprecated` | bool | True if flag is deprecated |
+| `is_experimental` | bool | True if flag is experimental |
+| `is_incompatible` | bool | True if flag is an incompatible change flag |
+
+**Example:**
+
+```starlark
+flag = flags.get("incompatible_enable_cc_toolchain_resolution", "8.0.0")
+if flag:
+    print("Default:", flag.default)
+    print("Deprecated:", flag.is_deprecated)
+```
+
+---
+
+#### flags.diff()
+
+Compute differences in flags between two Bazel versions.
+
+```starlark
+flags.diff(v1, v2) -> struct
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `v1` | string | Yes | Source version |
+| `v2` | string | Yes | Target version |
+
+**Returns:** A struct with:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `from_version` | string | Source version |
+| `to_version` | string | Target version |
+| `added` | list[Flag] | Flags added in v2 |
+| `removed` | list[Flag] | Flags removed in v2 |
+| `changed` | list[FlagChange] | Flags that changed |
+
+Each `FlagChange` has `name`, `from`, `to`, and `change_type` (e.g., "default_changed", "deprecated").
+
+**Example:**
+
+```starlark
+diff = flags.diff("7.0.0", "8.0.0")
+print("Added flags:", len(diff.added))
+print("Removed flags:", len(diff.removed))
+for change in diff.changed:
+    if change.change_type == "deprecated":
+        print("Newly deprecated:", change.name)
+```
+
+---
+
+#### flags.incompatible()
+
+Get all `--incompatible_*` flags for a Bazel version.
+
+```starlark
+flags.incompatible(version) -> list[Flag]
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `version` | string | Yes | Bazel version |
+
+**Example:**
+
+```starlark
+incompatible = flags.incompatible("8.0.0")
+for flag in incompatible:
+    print(flag.name, "default:", flag.default)
+```
+
+---
+
+#### flags.deprecated()
+
+Get all deprecated flags for a Bazel version.
+
+```starlark
+flags.deprecated(version) -> list[Flag]
+```
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `version` | string | Yes | Bazel version |
+
+**Example:**
+
+```starlark
+deprecated = flags.deprecated("8.0.0")
+for flag in deprecated:
+    print("Consider removing:", flag.name)
+```
+
+---
+
+## Deprecated Functions (Removed in v2.0)
+
+> **Warning:** The following global functions are deprecated. Use the namespaced module equivalents instead.
+
+| Deprecated Function | New Module Function |
+|--------------------|--------------------|
+| `get_project_context()` | `project.context()` |
+| `get_bazel_deps()` | `project.deps()` |
+| `get_bazel_compatibility()` | `project.compatibility()` |
+| `parse_version(s)` | `version.parse(s)` |
+| `version_compare(v1, v2)` | `version.compare(v1, v2)` |
+| `version_matches(v, cs)` | `version.matches(v, cs)` |
+| `version_at_least(v, min)` | `version.at_least(v, min)` |
+| `version_in_range(v, min, max)` | `version.in_range(v, min, max)` |
+| `read_file(path)` | `fs.read(path)` |
+| `file_exists(path)` | `fs.exists(path)` |
+| `glob(pattern)` | `fs.glob(pattern)` |
+| `list_dir(path)` | `fs.list_dir(path)` |
+| `parse_build_file(path)` | `fs.parse_build(path)` |
+
+When using deprecated functions, you'll see warnings like:
+```
+warning: read_file is deprecated, use fs.read instead
+```
+
+### Migration Example
+
+**Before (deprecated):**
+```starlark
+ctx = get_project_context()
+if version_at_least(ctx.bazel_version, "8.0.0"):
+    content = read_file("MODULE.bazel")
+    deps = get_bazel_deps()
+```
+
+**After (new API):**
+```starlark
+ctx = project.context()
+if version.at_least(ctx.bazel_version, "8.0.0"):
+    content = fs.read("MODULE.bazel")
+    deps = project.deps()
+```
+
+---
+
 ## Project Context Functions
+
+> **Deprecated:** Use `project.*` module instead. See [Deprecated Functions](#deprecated-functions-removed-in-v20).
 
 These functions provide information about the project being migrated.
 
@@ -684,6 +1302,8 @@ if ctx.bazel_version and not version_matches(ctx.bazel_version, compat):
 ---
 
 ## Version Utility Functions
+
+> **Deprecated:** Use `version.*` module instead. See [Deprecated Functions](#deprecated-functions-removed-in-v20).
 
 These functions help with version comparisons and constraint checking.
 
