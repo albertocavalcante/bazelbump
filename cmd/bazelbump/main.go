@@ -921,6 +921,8 @@ func runRecipe(args []string) error {
 		return runRecipeValidate(subargs)
 	case "builtins":
 		return runRecipeBuiltins(subargs)
+	case "test":
+		return runRecipeTest(subargs)
 	case "help", "-h", "--help":
 		printRecipeUsage()
 		return nil
@@ -946,6 +948,7 @@ such as adding load() statements for native rules or updating MODULE.bazel.
   init      Create a new recipe from a template
   validate  Validate a recipe file without running it
   builtins  List available Starlark builtins
+  test      Run tests for recipes (requires skytest)
 
 %s
   bazelbump recipe list
@@ -956,6 +959,8 @@ such as adding load() statements for native rules or updating MODULE.bazel.
   bazelbump recipe validate ./my-recipe.star
   bazelbump recipe builtins
   bazelbump recipe builtins ensure_load
+  bazelbump recipe test
+  bazelbump recipe test --coverage
 
 %s
   .bazelbump/recipes/*.star    Project recipes (highest priority)

@@ -389,3 +389,195 @@ func GetDiscoveryPaths(projectPath string) []string {
 
 	return result
 }
+
+// DiscoveredTest represents a test file found during discovery.
+type DiscoveredTest struct {
+	// Name is the test name (filename without .star extension)
+	Name string
+
+	// Path is the absolute path to the test file
+	Path string
+
+	// RecipeName is the name of the recipe this test is for (if determinable)
+	// Empty if the test is standalone or the recipe cannot be determined.
+	RecipeName string
+
+	// Source indicates where the test was found (same as DiscoverySource)
+	Source string
+}
+
+// TestDiscoveryOptions configures test file discovery.
+type TestDiscoveryOptions struct {
+	// ProjectPath is the project root directory.
+	// If empty, uses current working directory.
+	ProjectPath string
+
+	// UserConfigDir overrides the user config directory.
+	// If empty, uses ~/.config/bazelbump.
+	UserConfigDir string
+
+	// RecursiveSearch enables searching subdirectories.
+	// Default is false (only searches standard recipe directories).
+	RecursiveSearch bool
+}
+
+// DefaultTestDiscoveryOptions returns options with sensible defaults.
+func DefaultTestDiscoveryOptions() TestDiscoveryOptions {
+	return TestDiscoveryOptions{
+		ProjectPath:     ".",
+		RecursiveSearch: false,
+	}
+}
+
+// DiscoverTestFiles finds all test files (*_test.star, test_*.star) from standard paths.
+// Test files are discovered from the same locations as recipes.
+func DiscoverTestFiles(opts TestDiscoveryOptions) ([]DiscoveredTest, error) {
+	if opts.ProjectPath == "" {
+		opts.ProjectPath = "."
+	}
+
+	// Resolve project path to absolute
+	absProjectPath, err := filepath.Abs(opts.ProjectPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var tests []DiscoveredTest
+
+	// Discovery paths (same as recipes)
+	discoveryPaths := []struct {
+		path   string
+		source DiscoverySource
+	}{
+		{filepath.Join(absProjectPath, ".bazelbump", "recipes"), SourceProject},
+		{filepath.Join(absProjectPath, "recipes"), SourceProject},
+		{getUserRecipesPath(opts.UserConfigDir), SourceUser},
+	}
+
+	for _, dp := range discoveryPaths {
+		if dp.path == "" {
+			continue
+		}
+
+		found, err := discoverTestsFromDirectory(dp.path, dp.source)
+		if err != nil {
+			// Ignore errors for non-existent directories
+			continue
+		}
+
+		tests = append(tests, found...)
+	}
+
+	// Sort by name for consistent ordering
+	sort.Slice(tests, func(i, j int) bool {
+		return tests[i].Name < tests[j].Name
+	})
+
+	return tests, nil
+}
+
+// DiscoverTestsForRecipe finds test files associated with a specific recipe.
+// It looks for files named <recipe>_test.star or test_<recipe>.star in the same
+// directory as the recipe.
+func DiscoverTestsForRecipe(recipePath string) ([]DiscoveredTest, error) {
+	// Get the directory containing the recipe
+	dir := filepath.Dir(recipePath)
+	baseName := filepath.Base(recipePath)
+
+	// Remove .star extension to get recipe name
+	recipeName := strings.TrimSuffix(baseName, ".star")
+
+	var tests []DiscoveredTest
+
+	// Look for <recipe>_test.star
+	testPath := filepath.Join(dir, recipeName+"_test.star")
+	if _, err := os.Stat(testPath); err == nil {
+		tests = append(tests, DiscoveredTest{
+			Name:       recipeName + "_test",
+			Path:       testPath,
+			RecipeName: recipeName,
+			Source:     string(SourceExplicit),
+		})
+	}
+
+	// Look for test_<recipe>.star
+	testPath = filepath.Join(dir, "test_"+recipeName+".star")
+	if _, err := os.Stat(testPath); err == nil {
+		tests = append(tests, DiscoveredTest{
+			Name:       "test_" + recipeName,
+			Path:       testPath,
+			RecipeName: recipeName,
+			Source:     string(SourceExplicit),
+		})
+	}
+
+	return tests, nil
+}
+
+// discoverTestsFromDirectory finds all test files in a directory.
+func discoverTestsFromDirectory(dir string, source DiscoverySource) ([]DiscoveredTest, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var tests []DiscoveredTest
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".star") {
+			continue
+		}
+
+		// Check if this is a test file
+		if !isTestFile(name) {
+			continue
+		}
+
+		testName := strings.TrimSuffix(name, ".star")
+		absPath := filepath.Join(dir, name)
+
+		// Try to determine the associated recipe name
+		recipeName := ""
+		if strings.HasSuffix(testName, "_test") {
+			recipeName = strings.TrimSuffix(testName, "_test")
+		} else if strings.HasPrefix(testName, "test_") {
+			recipeName = strings.TrimPrefix(testName, "test_")
+		}
+
+		tests = append(tests, DiscoveredTest{
+			Name:       testName,
+			Path:       absPath,
+			RecipeName: recipeName,
+			Source:     string(source),
+		})
+	}
+
+	return tests, nil
+}
+
+// isTestFile returns true if the filename indicates a test file.
+func isTestFile(name string) bool {
+	// Must end with .star
+	if !strings.HasSuffix(name, ".star") {
+		return false
+	}
+
+	baseName := strings.TrimSuffix(name, ".star")
+
+	// Check for *_test.star pattern
+	if strings.HasSuffix(baseName, "_test") {
+		return true
+	}
+
+	// Check for test_*.star pattern
+	if strings.HasPrefix(baseName, "test_") {
+		return true
+	}
+
+	return false
+}
