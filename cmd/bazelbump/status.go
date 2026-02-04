@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/albertocavalcante/bazelbump/pkg/state"
 	"github.com/albertocavalcante/bazelbump/pkg/track"
 )
 
@@ -159,6 +160,39 @@ func outputStatusText(info *track.RunInfo, projectPath string) {
 	if len(info.ModifiedFiles) > 0 {
 		fmt.Printf("\n%s\n", color(colorBold, "To undo:"))
 		fmt.Printf("  bazelbump undo\n")
+	}
+
+	// Show state manager info if available
+	if state.Available() {
+		showStateManagerStatus(projectPath, info.Recipe)
+	}
+}
+
+// showStateManagerStatus displays additional status from the state manager.
+func showStateManagerStatus(projectPath, recipe string) {
+	dbPath := state.StateDBPath(projectPath)
+	mgr, err := state.New(dbPath)
+	if err != nil {
+		// No state database yet, that's fine
+		return
+	}
+	defer mgr.Close()
+
+	// Get latest run for this recipe
+	run, err := mgr.GetLatestRun(recipe)
+	if err != nil || run == nil {
+		return
+	}
+
+	// Show checkpoint info if run was interrupted
+	if run.Status == state.RunStatusInterrupted || run.Status == state.RunStatusRunning {
+		cp, err := mgr.GetLatestCheckpoint(run.ID)
+		if err == nil && cp != nil {
+			fmt.Printf("\n%s\n", color(colorBold, "Checkpoint available:"))
+			fmt.Printf("  Step:      %s (file %d/%d)\n", cp.StepID, cp.FileIndex, run.TotalFiles)
+			fmt.Printf("  Created:   %s\n", cp.CreatedAt.Format("15:04:05"))
+			fmt.Printf("\n  To resume: bazelbump recipe run %s --resume\n", recipe)
+		}
 	}
 }
 

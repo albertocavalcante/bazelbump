@@ -104,6 +104,10 @@ func main() {
 		err = runRecipe(args)
 	case "status":
 		err = runStatus(args)
+	case "history":
+		err = runHistory(args)
+	case "checkpoint":
+		err = runCheckpoint(args)
 	case "undo":
 		err = runUndo(args)
 	case "snapshot":
@@ -133,15 +137,17 @@ func printUsage() {
   bazelbump <command> [flags]
 
 %s
-  analyze   Analyze a project for Bazel upgrade issues
-  apply     Apply transforms to fix detected flag issues
-  diff      Show flag changes between Bazel versions
-  flags     List flags for a Bazel version
-  recipe    Run migration recipes
-  status    Show status of last bazelbump run
-  undo      Undo the last bazelbump run
-  snapshot  Manage snapshots (for non-git directories)
-  version   Show bazelbump version
+  analyze     Analyze a project for Bazel upgrade issues
+  apply       Apply transforms to fix detected flag issues
+  diff        Show flag changes between Bazel versions
+  flags       List flags for a Bazel version
+  recipe      Run migration recipes
+  status      Show status of last bazelbump run
+  history     Show run history
+  checkpoint  Manage checkpoints for resumable runs
+  undo        Undo the last bazelbump run
+  snapshot    Manage snapshots (for non-git directories)
+  version     Show bazelbump version
 
 %s
   bazelbump analyze --to 9.0.0

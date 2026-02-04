@@ -1,9 +1,10 @@
 # Workflow and Checkpointing System Specification
 
-**Status:** Draft v1  
-**Author:** bazelbump contributors  
-**Created:** 2026-02-03  
+**Status:** Draft v2 (Updated with review findings)
+**Author:** bazelbump contributors
+**Created:** 2026-02-03
 **Updated:** 2026-02-03
+**Review:** See [Appendix A](#appendix-a-design-rationale-and-benchmarks) for comparison with Temporal, DBOS, Prefect, Airflow, Bazel
 
 ## Summary
 
@@ -18,7 +19,7 @@ This specification defines a workflow and checkpointing system for bazelbump tha
 
 Testing on Envoy revealed the need for robust workflow management:
 - **1,696 BUILD files** scanned
-- **893 files** would be modified  
+- **893 files** would be modified
 - **967 lines** would be added
 
 For projects this large, users need:
@@ -90,6 +91,8 @@ For projects this large, users need:
 | JSON files | Simple, no deps | No ACID, hard to query | ❌ |
 | BoltDB | Pure Go, embedded | Less familiar, no SQL | ❌ |
 
+See [Appendix A.2](#a2-storage-approach-comparison) for detailed comparison.
+
 **IMPORTANT: No CGO Required**
 
 We use [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite) - a **pure Go** SQLite implementation:
@@ -110,7 +113,43 @@ db, err := sql.Open("sqlite", ".bazelbump/state.db")
 
 This aligns with our **airgap-first** philosophy - single binary, no system dependencies.
 
-### 2.3 Optional Feature (Build Tags)
+### 2.3 SQLite Configuration (Critical for Durability)
+
+**CRITICAL**: Default SQLite settings can lose data on power failure. We MUST configure for durability:
+
+```go
+func configureSQLite(db *sql.DB) error {
+    pragmas := []string{
+        // CRITICAL: Full sync for durability (default NORMAL can lose data)
+        "PRAGMA synchronous=FULL",
+
+        // WAL mode for concurrent reads during writes
+        "PRAGMA journal_mode=WAL",
+
+        // Limit WAL file size to prevent unbounded growth
+        "PRAGMA wal_autocheckpoint=100",      // Checkpoint every 100 pages
+        "PRAGMA journal_size_limit=5242880",  // Limit WAL to 5MB
+
+        // Wait up to 5s for locks (handles concurrent access)
+        "PRAGMA busy_timeout=5000",
+
+        // Foreign key enforcement
+        "PRAGMA foreign_keys=ON",
+    }
+
+    for _, pragma := range pragmas {
+        if _, err := db.Exec(pragma); err != nil {
+            return fmt.Errorf("failed to set %s: %w", pragma, err)
+        }
+    }
+
+    return nil
+}
+```
+
+**Rationale**: See [Appendix A.6](#a6-sqlite-wal-mode-analysis) for why `synchronous=FULL` is required.
+
+### 2.4 Optional Feature (Build Tags)
 
 The checkpointing system is **optional** and can be disabled at compile time using Go build tags (similar to Rust's feature flags):
 
@@ -188,25 +227,7 @@ func (m *noopManager) CreateCheckpoint(...) (*Checkpoint, error) {
 - Users who prefer smaller binaries
 - Simple one-off migrations
 
-**Justfile Integration:**
-
-```makefile
-# justfile
-build:
-    go build ./cmd/bazelbump
-
-build-minimal:
-    go build -tags nostate ./cmd/bazelbump
-
-# Show binary sizes
-size:
-    @echo "Full build:"
-    @go build -o /tmp/bazelbump-full ./cmd/bazelbump && ls -lh /tmp/bazelbump-full
-    @echo "Minimal build:"
-    @go build -tags nostate -o /tmp/bazelbump-minimal ./cmd/bazelbump && ls -lh /tmp/bazelbump-minimal
-```
-
-### 2.3 Database Schema
+### 2.5 Database Schema
 
 ```sql
 -- ============================================================
@@ -216,39 +237,47 @@ CREATE TABLE runs (
     id              TEXT PRIMARY KEY,           -- UUID
     recipe_name     TEXT NOT NULL,
     recipe_version  TEXT,
+    recipe_hash     TEXT,                       -- Hash of recipe content (for cache invalidation)
     project_path    TEXT NOT NULL,
-    
+
     -- Timing
     started_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     completed_at    TIMESTAMP,
-    
-    -- Status
+
+    -- Status (includes 'retrying' for better UX - inspired by Prefect)
     status          TEXT NOT NULL DEFAULT 'pending'
-                    CHECK(status IN ('pending', 'running', 'completed', 
+                    CHECK(status IN ('pending', 'running', 'retrying', 'completed',
                                      'failed', 'interrupted', 'cancelled')),
-    
+
     -- Progress
     total_files     INTEGER DEFAULT 0,
     processed_files INTEGER DEFAULT 0,
+    changed_files   INTEGER DEFAULT 0,
     current_step    TEXT,
     current_file    TEXT,
-    
+
+    -- Retry tracking (inspired by Prefect)
+    retry_count     INTEGER DEFAULT 0,
+
     -- Context
     git_commit      TEXT,                       -- HEAD at start
     git_branch      TEXT,
     bazel_version   TEXT,
     dry_run         BOOLEAN DEFAULT FALSE,
-    
+
     -- Configuration
     config_json     TEXT,                       -- Recipe options
-    
+
+    -- Context outputs at run level (inspired by Airflow XCom fix)
+    context_outputs TEXT,                       -- JSON: preserved across retries
+
     -- Result
-    error_message   TEXT,
-    changes_count   INTEGER DEFAULT 0
+    error_message   TEXT
 );
 
 CREATE INDEX idx_runs_status ON runs(status);
 CREATE INDEX idx_runs_started ON runs(started_at DESC);
+CREATE INDEX idx_runs_project ON runs(project_path);
 
 -- ============================================================
 -- CHECKPOINTS: Savepoints within runs
@@ -256,22 +285,23 @@ CREATE INDEX idx_runs_started ON runs(started_at DESC);
 CREATE TABLE checkpoints (
     id              TEXT PRIMARY KEY,           -- UUID
     run_id          TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    
+
     -- Position
     step_id         TEXT NOT NULL,
     step_index      INTEGER NOT NULL,
-    file_index      INTEGER NOT NULL,
-    
+    files_processed INTEGER NOT NULL,
+
     -- Timing
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
+
     -- Type
     checkpoint_type TEXT NOT NULL DEFAULT 'auto'
                     CHECK(checkpoint_type IN ('auto', 'manual', 'step_boundary')),
-    
-    -- State snapshot
+
+    -- State snapshot (with size tracking)
     state_json      TEXT,                       -- Serialized execution state
-    
+    state_size      INTEGER,                    -- Size in bytes for monitoring
+
     -- Metadata
     description     TEXT
 );
@@ -285,57 +315,82 @@ CREATE INDEX idx_checkpoints_created ON checkpoints(created_at DESC);
 CREATE TABLE file_states (
     run_id          TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     file_path       TEXT NOT NULL,
-    
+
     -- Status
     status          TEXT NOT NULL DEFAULT 'pending'
-                    CHECK(status IN ('pending', 'skipped', 'processing', 
-                                     'completed', 'failed')),
-    
+                    CHECK(status IN ('pending', 'skipped', 'in_progress',
+                                     'staged', 'completed', 'failed')),
+
     -- Change detection
     content_hash    TEXT,                       -- xxHash of file content
+    after_hash      TEXT,                       -- Hash after modification
     mtime           INTEGER,                    -- File modification time
-    
+    file_exists     BOOLEAN DEFAULT TRUE,       -- Track if file still exists
+
     -- Timing
     started_at      TIMESTAMP,
     completed_at    TIMESTAMP,
-    
+
     -- Result
     changed         BOOLEAN DEFAULT FALSE,
     lines_added     INTEGER DEFAULT 0,
     lines_removed   INTEGER DEFAULT 0,
     error_message   TEXT,
-    
+
     PRIMARY KEY (run_id, file_path)
 );
 
 CREATE INDEX idx_file_states_status ON file_states(run_id, status);
 
 -- ============================================================
--- AUDIT_LOG: Detailed change history
+-- EVENT_LOG: Detailed event history (inspired by Temporal)
+-- ============================================================
+-- Separate from audit_log for better debugging and replay capability
+CREATE TABLE event_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+
+    -- Timing
+    timestamp       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    sequence        INTEGER NOT NULL,           -- Monotonic sequence within run
+
+    -- Event details
+    event_type      TEXT NOT NULL,              -- Flexible: any event type
+    file_path       TEXT,
+    step_id         TEXT,
+
+    -- Event data (JSON)
+    event_data      TEXT
+);
+
+CREATE INDEX idx_event_log_run ON event_log(run_id, sequence);
+CREATE INDEX idx_event_log_timestamp ON event_log(timestamp DESC);
+
+-- ============================================================
+-- AUDIT_LOG: Human-readable change history
 -- ============================================================
 CREATE TABLE audit_log (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id          TEXT REFERENCES runs(id) ON DELETE CASCADE,
-    
+
     -- Timing
     timestamp       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
+
     -- What happened
     action          TEXT NOT NULL
                     CHECK(action IN ('file_modified', 'file_created', 'file_deleted',
                                      'checkpoint_created', 'checkpoint_restored',
                                      'run_started', 'run_completed', 'run_failed',
-                                     'step_started', 'step_completed')),
-    
+                                     'run_resumed', 'step_started', 'step_completed')),
+
     -- Details
     file_path       TEXT,
     step_id         TEXT,
     description     TEXT,
     diff_summary    TEXT,                       -- "+3 -1" style summary
-    
+
     -- Before/after for debugging
-    old_value       TEXT,
-    new_value       TEXT
+    details_json    TEXT                        -- Flexible JSON details
 );
 
 CREATE INDEX idx_audit_log_run ON audit_log(run_id);
@@ -350,7 +405,7 @@ CREATE TABLE schema_version (
     applied_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT INTO schema_version (version) VALUES (1);
+INSERT INTO schema_version (version) VALUES (2);
 ```
 
 ---
@@ -370,31 +425,38 @@ INSERT INTO schema_version (version) VALUES (1);
               ┌───────────────┼───────────────┐
               │               │               │
               ▼               ▼               ▼
-        ┌──────────┐   ┌─────────────┐   ┌────────┐
-        │  failed  │   │ interrupted │   │ paused │
-        └──────────┘   └─────────────┘   └────────┘
+        ┌──────────┐   ┌─────────────┐   ┌────────────┐
+        │  failed  │   │ interrupted │   │  retrying  │
+        └──────────┘   └─────────────┘   └────────────┘
                               │               │
                               │    User: --resume
                               │               │
                               ▼               ▼
                          ┌─────────────────────┐
-                         │    resumed/running  │
+                         │       running       │
                          └─────────────────────┘
 ```
 
 ### 3.2 File States
 
 ```
-┌─────────┐   scan    ┌────────────┐   process   ┌───────────┐
-│ pending │─────────▶│ processing │────────────▶│ completed │
-└─────────┘          └────────────┘             └───────────┘
-     │                     │
-     │ unchanged           │ error
-     ▼                     ▼
-┌─────────┐          ┌────────┐
-│ skipped │          │ failed │
-└─────────┘          └────────┘
+                    ┌───────────────────────────────────────┐
+                    │          Atomic File Update           │
+                    │  (write temp → staged → rename)       │
+                    └───────────────────────────────────────┘
+                                      │
+┌─────────┐   scan    ┌─────────────┐ │ write    ┌────────┐  rename   ┌───────────┐
+│ pending │──────────▶│ in_progress │─┴─────────▶│ staged │──────────▶│ completed │
+└─────────┘           └─────────────┘             └────────┘           └───────────┘
+     │                      │                          │
+     │ unchanged            │ error                    │ error
+     ▼                      ▼                          ▼
+┌─────────┐           ┌────────┐                 ┌────────┐
+│ skipped │           │ failed │                 │ failed │
+└─────────┘           └────────┘                 └────────┘
 ```
+
+**Key Addition**: The `staged` state enables atomic file updates. See [Section 10.4](#104-atomic-file-updates).
 
 ---
 
@@ -416,20 +478,20 @@ INSERT INTO schema_version (version) VALUES (1);
   "run_id": "run-2026-02-03-142500-xyz789",
   "created_at": "2026-02-03T14:30:22Z",
   "checkpoint_type": "auto",
-  
+
   "position": {
     "step_id": "detect-native-rules",
     "step_index": 0,
-    "file_index": 423,
+    "files_processed": 423,
     "total_files": 893
   },
-  
+
   "execution_state": {
     "scan_results": { /* partial results */ },
     "pending_operations": [ /* remaining ops */ ],
     "context_outputs": { /* step outputs so far */ }
   },
-  
+
   "statistics": {
     "files_processed": 423,
     "files_modified": 187,
@@ -439,33 +501,59 @@ INSERT INTO schema_version (version) VALUES (1);
 }
 ```
 
-### 4.3 Checkpoint Operations
+### 4.3 Checkpoint Size Management
+
+**Problem**: For large projects, checkpoint state can grow to several MB, causing storage bloat.
+
+**Solution**: Implement size limits and cleanup:
 
 ```go
-// CheckpointManager handles checkpoint lifecycle
-type CheckpointManager interface {
-    // Create a new checkpoint
-    Create(ctx context.Context, opts CheckpointOptions) (*Checkpoint, error)
-    
-    // Restore execution state from checkpoint
-    Restore(ctx context.Context, checkpointID string) (*ExecutionState, error)
-    
-    // List checkpoints for a run
-    List(ctx context.Context, runID string) ([]*Checkpoint, error)
-    
-    // Get latest checkpoint
-    Latest(ctx context.Context, runID string) (*Checkpoint, error)
-    
-    // Delete old checkpoints
-    Cleanup(ctx context.Context, keepLast int) error
+const (
+    MaxCheckpointSize  = 1 * 1024 * 1024  // 1MB warning threshold
+    MaxCheckpointsPerRun = 10             // Keep last 10 checkpoints
+)
+
+func (m *sqliteManager) CreateCheckpoint(opts CheckpointOptions) (*Checkpoint, error) {
+    stateJSON, err := json.Marshal(opts.State)
+    if err != nil {
+        return nil, err
+    }
+
+    // Warn if state is too large
+    if len(stateJSON) > MaxCheckpointSize {
+        log.Warnf("Checkpoint state is large (%d bytes), consider reducing scan scope", len(stateJSON))
+    }
+
+    // Create checkpoint with size tracking
+    cp := &Checkpoint{
+        ID:        generateID("cp"),
+        StateJSON: string(stateJSON),
+        StateSize: len(stateJSON),
+        // ...
+    }
+
+    // ... insert checkpoint ...
+
+    // Cleanup old checkpoints (keep last N)
+    if err := m.cleanupOldCheckpoints(opts.RunID, MaxCheckpointsPerRun); err != nil {
+        log.Warnf("Failed to cleanup old checkpoints: %v", err)
+    }
+
+    return cp, nil
 }
 
-type CheckpointOptions struct {
-    Type        CheckpointType  // auto, manual, step_boundary
-    Description string          // Optional user description
-    StepID      string          // Current step
-    FileIndex   int             // Current file position
-    State       *ExecutionState // Serializable state
+func (m *sqliteManager) cleanupOldCheckpoints(runID string, keepLast int) error {
+    _, err := m.db.Exec(`
+        DELETE FROM checkpoints
+        WHERE run_id = ?
+        AND id NOT IN (
+            SELECT id FROM checkpoints
+            WHERE run_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+        )
+    `, runID, runID, keepLast)
+    return err
 }
 ```
 
@@ -498,18 +586,18 @@ type ProgressReporter interface {
     OnRunStart(run *Run)
     OnRunComplete(run *Run, result *Result)
     OnRunError(run *Run, err error)
-    
+
     // Step lifecycle
     OnStepStart(step Step)
     OnStepProgress(step Step, processed, total int)
     OnStepComplete(step Step, result *StepResult)
-    
+
     // File lifecycle
     OnFileStart(path string)
     OnFileComplete(path string, change *FileChange)
     OnFileSkipped(path string, reason string)
     OnFileError(path string, err error)
-    
+
     // Checkpoints
     OnCheckpointCreated(cp *Checkpoint)
     OnCheckpointRestored(cp *Checkpoint)
@@ -551,7 +639,7 @@ Step 1/3: Detect native rules
 │  Progress: 423/893 files (47%)
 │  [████████████░░░░░░░░░░░░░░] ETA: 2m 34s
 │  Current: source/server/config/BUILD.bazel
-│  
+│
 │  Found: 1,823 cc_library | 456 cc_test | 89 proto_library
 │
 ├─ ✓ Checkpoint saved: step-1-file-400 (auto)
@@ -562,7 +650,7 @@ Step 2/3: Add module dependencies
 ├─ Updating MODULE.bazel...
 └─ ✓ Completed in 0.2s (3 deps added)
 
-Step 3/3: Add load statements  
+Step 3/3: Add load statements
 ├─ Processing BUILD files...
 │  Progress: 234/893 files (26%)
 │  [██████░░░░░░░░░░░░░░░░░░░░] ETA: 1m 45s
@@ -573,56 +661,62 @@ Step 3/3: Add load statements
    Run 'bazelbump recipe run autoload-migration --resume' to continue
 ```
 
-### 5.4 JSON Progress Stream
-
-```jsonl
-{"event":"run_start","run_id":"run-123","recipe":"autoload-migration","timestamp":"..."}
-{"event":"step_start","step_id":"detect-native-rules","step_index":0}
-{"event":"file_start","path":"source/common/BUILD"}
-{"event":"file_complete","path":"source/common/BUILD","changed":true,"lines_added":1}
-{"event":"progress","step_id":"detect-native-rules","processed":100,"total":893}
-{"event":"checkpoint","checkpoint_id":"cp-456","type":"auto","file_index":100}
-{"event":"step_complete","step_id":"detect-native-rules","duration_ms":4200}
-{"event":"run_complete","run_id":"run-123","success":true,"files_modified":893}
-```
-
 ---
 
 ## 6. Incremental Execution
 
-### 6.1 Change Detection
+### 6.1 Change Detection with Recipe Hash
+
+**Key Insight from Bazel**: Cache keys must include both content hash AND action definition. If the recipe changes, cached results are invalid.
 
 ```go
 // ChangeDetector determines if a file needs reprocessing
 type ChangeDetector interface {
     // HasChanged returns true if file needs reprocessing
     HasChanged(path string, lastRun *Run) (bool, error)
-    
+
     // ComputeHash computes content hash for a file
     ComputeHash(path string) (string, error)
-    
-    // RecordState stores file state after processing
-    RecordState(path string, hash string) error
+
+    // ComputeRecipeHash computes hash of recipe definition
+    ComputeRecipeHash(recipe *Recipe) (string, error)
 }
 
-// Implementation using xxHash (fast, non-cryptographic)
-type XXHashDetector struct {
-    stateManager StateManager
+// CacheKey for determining if processing is needed
+type CacheKey struct {
+    FilePath      string
+    ContentHash   string
+    RecipeHash    string  // Hash of recipe content
+    RecipeVersion string
 }
 
 func (d *XXHashDetector) HasChanged(path string, lastRun *Run) (bool, error) {
-    // Get stored hash from last run
+    // Check if recipe changed (invalidates all cache)
+    if lastRun.RecipeHash != d.currentRecipeHash {
+        return true, nil  // Recipe changed, must reprocess
+    }
+
+    // Check if file changed
     lastState, err := d.stateManager.GetFileState(lastRun.ID, path)
     if err != nil || lastState == nil {
-        return true, nil // Never processed, needs processing
+        return true, nil // Never processed
     }
-    
-    // Compute current hash
+
+    // Quick check: mtime (avoids hash computation)
+    stat, err := os.Stat(path)
+    if err != nil {
+        return true, nil // File may have been deleted
+    }
+    if stat.ModTime().Unix() == lastState.Mtime {
+        return false, nil // Fast path: unchanged
+    }
+
+    // Full check: content hash
     currentHash, err := d.ComputeHash(path)
     if err != nil {
         return true, err
     }
-    
+
     return currentHash != lastState.ContentHash, nil
 }
 ```
@@ -642,15 +736,6 @@ bazelbump recipe run autoload-migration --resume
 # Incremental from specific run
 bazelbump recipe run autoload-migration --since run-abc123
 ```
-
-### 6.3 Skip Reasons
-
-| Reason | Description |
-|--------|-------------|
-| `unchanged` | File content hash matches previous run |
-| `already_processed` | File completed in current run (resume) |
-| `excluded` | File matches exclude pattern |
-| `no_match` | File doesn't match scan patterns |
 
 ---
 
@@ -681,25 +766,13 @@ Flags:
   --run <id>      Show specific run
   --progress      Live progress for running execution
   --json          JSON output
+  --export        Export run state to JSON file
 
 Examples:
   bazelbump status                    # Current/last run summary
   bazelbump status --progress         # Live progress display
   bazelbump status --run run-abc123   # Specific run details
-```
-
-**Output:**
-```
-Last Run: autoload-migration
-  Status:    interrupted
-  Started:   2026-02-03 14:25:00 (38 minutes ago)
-  Progress:  423/893 files (47%)
-  Step:      detect-native-rules (1/3)
-  
-  Checkpoint: step-1-file-400 (2 minutes ago)
-  
-  To resume: bazelbump recipe run autoload-migration --resume
-  To restart: bazelbump recipe run autoload-migration --restart
+  bazelbump status --export run.json  # Export for debugging
 ```
 
 ### 7.3 History Command
@@ -714,25 +787,6 @@ Flags:
   --status <s>     Filter by status
   --limit <n>      Limit results (default: 10)
   --json           JSON output
-
-Examples:
-  bazelbump history                           # Recent runs
-  bazelbump history --since 7d                # Last 7 days
-  bazelbump history --recipe autoload-migration
-  bazelbump history --run run-abc123          # Full details
-```
-
-**Output:**
-```
-Recent Runs:
-
-ID              Recipe              Status       Files    Duration   When
-─────────────────────────────────────────────────────────────────────────────
-run-abc123      autoload-migration  interrupted  423/893  4m 12s     38m ago
-run-xyz789      flag-cleanup        completed    5/5      1.2s       2h ago
-run-def456      autoload-migration  completed    893/893  8m 34s     1d ago
-
-Use 'bazelbump history --run <id>' for details.
 ```
 
 ### 7.4 Checkpoint Commands
@@ -741,212 +795,394 @@ Use 'bazelbump history --run <id>' for details.
 bazelbump checkpoint list [flags]
 bazelbump checkpoint create [flags]
 bazelbump checkpoint restore <id> [flags]
+bazelbump checkpoint export <id> [flags]    # Export checkpoint to JSON
 bazelbump checkpoint delete <id> [flags]
 
 Flags:
   --run <id>      Target run (default: current/last)
   --json          JSON output
   --force         Skip confirmation for destructive ops
-
-Examples:
-  bazelbump checkpoint list
-  bazelbump checkpoint create --description "Before risky step"
-  bazelbump checkpoint restore cp-abc123
-```
-
-**Output:**
-```
-Checkpoints for run-abc123:
-
-ID              Type    Step                   File      Created
-────────────────────────────────────────────────────────────────────
-cp-001          auto    detect-native-rules    100/893   14:27:00
-cp-002          auto    detect-native-rules    200/893   14:28:30
-cp-003          auto    detect-native-rules    300/893   14:30:00
-cp-004          auto    detect-native-rules    400/893   14:31:30
-
-Use 'bazelbump checkpoint restore <id>' to restore.
 ```
 
 ---
 
-## 8. Integration with Existing Systems
+## 8. Error Handling
 
-### 8.1 Integration with pkg/track
+### 8.1 Sentinel Errors
 
-The checkpoint system builds on the existing `pkg/track/` system:
+**Rationale**: Consistent error handling improves API usability. See [Appendix A.5](#a5-api-design-insights).
 
 ```go
-// Extended Tracker interface
-type Tracker interface {
-    // Existing methods (file tracking)
-    TrackFile(path string) error
-    GetLastRun() (*TrackedRun, error)
-    Undo() error
-    
-    // New methods (state management)
-    StateManager() StateManager
-    CheckpointManager() CheckpointManager
-    ProgressReporter() ProgressReporter
+package state
+
+import "errors"
+
+// Sentinel errors for consistent error handling
+var (
+    ErrNotFound         = errors.New("not found")
+    ErrRunNotFound      = errors.New("run not found")
+    ErrCheckpointNotFound = errors.New("checkpoint not found")
+    ErrAlreadyCompleted = errors.New("run already completed")
+    ErrLockHeld         = errors.New("another instance is running")
+    ErrStateCorrupted   = errors.New("state database corrupted")
+)
+
+// Example usage
+func (m *sqliteManager) GetRun(id string) (*Run, error) {
+    row := m.db.QueryRow("SELECT ... FROM runs WHERE id = ?", id)
+
+    var run Run
+    err := row.Scan(...)
+    if err == sql.ErrNoRows {
+        return nil, ErrRunNotFound
+    }
+    if err != nil {
+        return nil, fmt.Errorf("query failed: %w", err)
+    }
+
+    return &run, nil
 }
 
-// TrackerWithState wraps existing trackers with state management
-type TrackerWithState struct {
-    Tracker              // Embedded existing tracker (git or file)
-    state   StateManager
-    cp      CheckpointManager
+// Caller can check with errors.Is
+run, err := manager.GetRun(id)
+if errors.Is(err, state.ErrRunNotFound) {
+    // Handle not found case
 }
 ```
 
-### 8.2 Integration with Recipe Executor
+### 8.2 Resume Semantics Decision Tree
+
+```
+bazelbump recipe run <recipe> [flags]
+                │
+                ▼
+    ┌───────────────────────┐
+    │ Check for --restart   │
+    └───────────────────────┘
+                │
+        ┌───────┴───────┐
+        │ yes           │ no
+        ▼               ▼
+    ┌───────┐   ┌───────────────────────┐
+    │ Fresh │   │ Check for --resume    │
+    │ Start │   └───────────────────────┘
+    └───────┘               │
+                    ┌───────┴───────┐
+                    │ yes           │ no
+                    ▼               ▼
+            ┌───────────────┐   ┌───────────────────────┐
+            │ Find last     │   │ Find last completed   │
+            │ interrupted   │   │ run for incremental   │
+            │ run           │   └───────────────────────┘
+            └───────────────┘               │
+                    │               ┌───────┴───────┐
+            ┌───────┴───────┐       │ found         │ not found
+            │ found         │ not   ▼               ▼
+            ▼               │ found ┌───────────┐   ┌───────┐
+    ┌───────────────┐       │       │Incremental│   │ Fresh │
+    │ Resume from   │       │       │   Run     │   │ Start │
+    │ checkpoint    │       │       └───────────┘   └───────┘
+    └───────────────┘       │
+                            ▼
+                    ┌───────────────┐
+                    │ Error: no run │
+                    │ to resume     │
+                    └───────────────┘
+```
+
+---
+
+## 9. Performance Optimizations
+
+### 9.1 Batched Database Writes
+
+**Problem**: Individual writes per file cause 2,679+ writes for Envoy (893 files × 3 writes each).
+
+**Solution**: Batch writes and flush periodically:
 
 ```go
-// Enhanced executor context
-type Context struct {
-    // Existing fields
-    ProjectPath string
-    DryRun      bool
-    Verbose     bool
-    Outputs     map[string]any
-    Changes     []*FileChange
-    Tracker     FileTracker
-    
-    // New fields for checkpointing
-    RunID       string
-    State       StateManager
-    Checkpoints CheckpointManager
-    Progress    ProgressReporter
-    
-    // Resume state (populated when resuming)
-    ResumeFrom  *Checkpoint
-    SkipFiles   map[string]bool  // Already processed files
+type BatchedStateManager struct {
+    Manager
+
+    pendingFileStates []FileState
+    pendingEvents     []EventLogEntry
+
+    flushThreshold    int           // Flush every N operations
+    flushInterval     time.Duration // Flush every N seconds
+    lastFlush         time.Time
+
+    mu sync.Mutex
 }
 
-// Enhanced executor
-func (e *Executor) Execute(recipe *Recipe, opts Options) (*Result, error) {
-    // Initialize or resume run
-    var run *Run
-    if opts.Resume {
-        run, checkpoint = e.resumeRun(recipe)
-    } else {
-        run = e.startNewRun(recipe, opts)
+func (m *BatchedStateManager) SetFileState(runID, path string, status FileStatus, hash string) error {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+
+    m.pendingFileStates = append(m.pendingFileStates, FileState{
+        RunID:       runID,
+        FilePath:    path,
+        Status:      status,
+        ContentHash: hash,
+    })
+
+    if len(m.pendingFileStates) >= m.flushThreshold ||
+       time.Since(m.lastFlush) >= m.flushInterval {
+        return m.flush()
     }
-    
-    // Set up progress reporting
-    ctx.Progress.OnRunStart(run)
-    defer ctx.Progress.OnRunComplete(run, result)
-    
-    // Execute with checkpointing
-    for i, step := range sortedSteps {
-        if checkpoint != nil && i < checkpoint.StepIndex {
-            continue // Skip completed steps
+
+    return nil
+}
+
+func (m *BatchedStateManager) flush() error {
+    if len(m.pendingFileStates) == 0 && len(m.pendingEvents) == 0 {
+        return nil
+    }
+
+    tx, err := m.db.Begin()
+    if err != nil {
+        return err
+    }
+    defer tx.Rollback()
+
+    // Bulk insert file states using upsert (idempotent - inspired by DBOS)
+    stmt, err := tx.Prepare(`
+        INSERT INTO file_states (run_id, file_path, status, content_hash)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(run_id, file_path) DO UPDATE SET
+            status = excluded.status,
+            content_hash = COALESCE(excluded.content_hash, file_states.content_hash),
+            completed_at = CASE WHEN excluded.status = 'completed' THEN CURRENT_TIMESTAMP ELSE file_states.completed_at END
+        WHERE file_states.status != 'completed'
+    `)
+    if err != nil {
+        return err
+    }
+    defer stmt.Close()
+
+    for _, fs := range m.pendingFileStates {
+        if _, err := stmt.Exec(fs.RunID, fs.FilePath, fs.Status, fs.ContentHash); err != nil {
+            return err
         }
-        
-        ctx.Progress.OnStepStart(step)
-        result := e.executeStepWithCheckpoints(ctx, step, opts)
-        ctx.Progress.OnStepComplete(step, result)
     }
-    
-    return result, nil
+
+    // Bulk insert events
+    // ... similar pattern ...
+
+    if err := tx.Commit(); err != nil {
+        return err
+    }
+
+    m.pendingFileStates = m.pendingFileStates[:0]
+    m.pendingEvents = m.pendingEvents[:0]
+    m.lastFlush = time.Now()
+
+    return nil
 }
 ```
 
----
+### 9.2 Optimized Hash Computation
 
-## 9. Performance Considerations
+**Problem**: Computing hash before AND after each file doubles I/O.
 
-### 9.1 Benchmarks
+**Solution**: Use mtime as initial filter, only hash when needed:
 
-Target performance for Envoy-scale projects (1,696 files, 893 to modify):
+```go
+func (d *XXHashDetector) HasChangedOptimized(path string, lastState *FileState) (bool, error) {
+    stat, err := os.Stat(path)
+    if err != nil {
+        if os.IsNotExist(err) {
+            return false, nil // File deleted, skip
+        }
+        return true, err
+    }
+
+    // Fast path: mtime unchanged
+    if lastState != nil && stat.ModTime().Unix() == lastState.Mtime {
+        return false, nil
+    }
+
+    // Slow path: compute hash
+    hash, err := d.ComputeHash(path)
+    if err != nil {
+        return true, err
+    }
+
+    if lastState == nil {
+        return true, nil
+    }
+
+    return hash != lastState.ContentHash, nil
+}
+```
+
+### 9.3 Benchmark Targets
 
 | Operation | Target | Notes |
 |-----------|--------|-------|
 | Checkpoint create | < 50ms | Serialize + write to SQLite |
 | Checkpoint restore | < 100ms | Read + deserialize |
 | File state lookup | < 1ms | Indexed query |
-| Hash computation | < 10ms/file | xxHash is fast |
-| Progress update | < 1ms | In-memory, batch DB writes |
-
-### 9.2 Optimization Strategies
-
-| Strategy | Implementation |
-|----------|---------------|
-| Batch DB writes | Buffer file states, flush every 100 files |
-| Hash caching | LRU cache for recently computed hashes |
-| Lazy serialization | Only serialize state at checkpoint time |
-| Async progress | Progress updates on separate goroutine |
-
-### 9.3 Memory Management
-
-```go
-// For very large projects, stream file processing
-type StreamingExecutor struct {
-    batchSize int // Process files in batches
-    
-    // Don't hold all file states in memory
-    // Query from DB as needed
-}
-```
+| Batch flush (100 files) | < 50ms | Single transaction |
+| Hash computation | < 5ms/file | xxHash + mtime filter |
+| Progress update | < 1ms | In-memory, async |
 
 ---
 
-## 10. Error Handling and Recovery
+## 10. Crash Recovery and Safety
 
-### 10.1 Error Scenarios
+### 10.1 Orphaned Run Detection
 
-| Scenario | Behavior |
-|----------|----------|
-| Process killed (SIGKILL) | Resume from last checkpoint |
-| Graceful interrupt (SIGINT) | Create checkpoint, then exit |
-| Disk full | Fail with clear error, no corruption |
-| Corrupt state.db | Backup + recreate, warn user |
-| File disappeared mid-run | Log warning, continue with remaining |
+**Problem**: If process crashes hard (SIGKILL), runs remain in "running" status forever.
 
-### 10.2 Crash Recovery
+**Solution**: Detect and remediate on startup:
+
+```go
+func (m *sqliteManager) ValidateOnStartup() error {
+    // Find runs stuck in "running" status for > 1 hour
+    result, err := m.db.Exec(`
+        UPDATE runs
+        SET status = 'interrupted',
+            error_message = 'Process terminated unexpectedly'
+        WHERE status = 'running'
+        AND started_at < datetime('now', '-1 hour')
+    `)
+    if err != nil {
+        return err
+    }
+
+    affected, _ := result.RowsAffected()
+    if affected > 0 {
+        log.Warnf("Marked %d orphaned runs as interrupted", affected)
+    }
+
+    return nil
+}
+```
+
+### 10.2 Graceful Shutdown
 
 ```go
 func (e *Executor) Execute(recipe *Recipe, opts Options) (*Result, error) {
     // Register signal handler
     sigChan := make(chan os.Signal, 1)
     signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-    
+
     go func() {
         <-sigChan
         // Graceful shutdown
         log.Info("Interrupt received, creating checkpoint...")
+
+        // Flush any pending writes
+        e.state.Flush()
+
+        // Create checkpoint
         e.createCheckpoint(ctx, CheckpointOptions{
             Type: CheckpointTypeInterrupt,
             Description: "Interrupted by user",
         })
+
         e.state.UpdateRunStatus(ctx.RunID, StatusInterrupted)
         os.Exit(130)
     }()
-    
+
     // ... execution ...
 }
 ```
 
-### 10.3 State Validation
+### 10.3 Cross-Platform File Locking
+
+**Problem**: `flock()` doesn't work on Windows or NFS (common in CI).
+
+**Solution**: Use cross-platform locking library:
 
 ```go
-// Validate state on startup
-func (sm *StateManager) Validate() error {
-    // Check schema version
-    version, err := sm.getSchemaVersion()
-    if err != nil || version != CurrentSchemaVersion {
-        return sm.migrate(version, CurrentSchemaVersion)
+import "github.com/gofrs/flock"
+
+type StateLock struct {
+    flock *flock.Flock
+}
+
+func NewStateLock(path string) *StateLock {
+    return &StateLock{
+        flock: flock.New(path),
     }
-    
-    // Check for incomplete runs
-    incompleteRuns, err := sm.findIncompleteRuns()
+}
+
+func (l *StateLock) Acquire() error {
+    locked, err := l.flock.TryLock()
+    if err != nil {
+        return fmt.Errorf("failed to acquire lock: %w", err)
+    }
+    if !locked {
+        return ErrLockHeld
+    }
+    return nil
+}
+
+func (l *StateLock) Release() error {
+    return l.flock.Unlock()
+}
+```
+
+### 10.4 Atomic File Updates
+
+**Problem**: If process crashes mid-write, files can be corrupted with no recovery path.
+
+**Solution**: Two-phase commit pattern for file modifications:
+
+```go
+func (e *Executor) modifyFileAtomically(ctx *ExecutionContext, path string, transform func([]byte) ([]byte, error)) error {
+    // 1. Read original content
+    original, err := os.ReadFile(path)
     if err != nil {
         return err
     }
-    
-    for _, run := range incompleteRuns {
-        log.Warnf("Found incomplete run: %s (status: %s)", run.ID, run.Status)
+
+    // 2. Apply transformation
+    modified, err := transform(original)
+    if err != nil {
+        return err
     }
-    
+
+    // 3. Write to temp file
+    tempPath := path + ".bazelbump-tmp"
+    if err := os.WriteFile(tempPath, modified, 0644); err != nil {
+        return err
+    }
+
+    // 4. Mark file as "staged"
+    if err := ctx.StateManager.SetFileState(ctx.RunID, path, FileStatusStaged, ""); err != nil {
+        os.Remove(tempPath)
+        return err
+    }
+
+    // 5. Atomic rename (on POSIX, this is atomic within same filesystem)
+    if err := os.Rename(tempPath, path); err != nil {
+        os.Remove(tempPath)
+        return err
+    }
+
+    // 6. Mark as completed
+    afterHash, _ := computeHash(path)
+    return ctx.StateManager.SetFileState(ctx.RunID, path, FileStatusCompleted, afterHash)
+}
+
+// Recovery: clean up any staged files on resume
+func (e *Executor) cleanupStagedFiles(ctx *ExecutionContext) error {
+    staged, err := ctx.StateManager.GetFilesByStatus(ctx.RunID, FileStatusStaged)
+    if err != nil {
+        return err
+    }
+
+    for _, path := range staged {
+        tempPath := path + ".bazelbump-tmp"
+        if _, err := os.Stat(tempPath); err == nil {
+            // Temp file exists, complete the rename
+            os.Rename(tempPath, path)
+        }
+        ctx.StateManager.SetFileState(ctx.RunID, path, FileStatusCompleted, "")
+    }
+
     return nil
 }
 ```
@@ -955,42 +1191,34 @@ func (sm *StateManager) Validate() error {
 
 ## 11. Concurrency and Locking
 
-### 11.1 File Locking
+### 11.1 SQLite Concurrency
+
+**Important**: SQLite already handles concurrency well. We rely on SQLite's locking, not Go mutexes:
 
 ```go
-// Prevent multiple bazelbump instances
-type StateLock struct {
-    lockFile string
-    file     *os.File
-}
-
-func (l *StateLock) Acquire() error {
-    l.file, err := os.OpenFile(l.lockFile, os.O_CREATE|os.O_RDWR, 0600)
-    if err != nil {
-        return err
-    }
-    
-    err = syscall.Flock(int(l.file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-    if err != nil {
-        return fmt.Errorf("another bazelbump instance is running")
-    }
-    
-    return nil
-}
-
-func (l *StateLock) Release() error {
-    syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
-    return l.file.Close()
-}
+// Configure SQLite for safe concurrent access
+db.SetMaxOpenConns(1)                    // Single writer (SQLite limitation)
+db.Exec("PRAGMA journal_mode=WAL")       // Allow concurrent reads
+db.Exec("PRAGMA busy_timeout=5000")      // Wait up to 5s for locks
 ```
 
-### 11.2 SQLite Configuration
+### 11.2 Process-Level Locking
 
 ```go
-// Configure SQLite for concurrent access (read-only queries)
-db.SetMaxOpenConns(1)        // Single writer
-db.Exec("PRAGMA journal_mode=WAL")  // Allow concurrent reads
-db.Exec("PRAGMA busy_timeout=5000") // Wait up to 5s for locks
+// Prevent multiple bazelbump instances on same project
+func (m *sqliteManager) AcquireLock() error {
+    lockPath := filepath.Join(m.path, "..", "locks", "state.lock")
+    m.lock = NewStateLock(lockPath)
+
+    if err := m.lock.Acquire(); err != nil {
+        if errors.Is(err, ErrLockHeld) {
+            return fmt.Errorf("another bazelbump instance is running on this project")
+        }
+        return err
+    }
+
+    return nil
+}
 ```
 
 ---
@@ -1028,72 +1256,162 @@ $ bazelbump recipe run autoload-migration --resume
 ==> Completed! 893 files modified.
 ```
 
-### 12.2 Incremental Re-run
+### 12.2 Debugging with Export
 
 ```bash
-# First run
-$ bazelbump recipe run autoload-migration
-==> Completed! 893 files modified.
+# Export checkpoint state for debugging
+$ bazelbump checkpoint export cp-abc123 --format=json > checkpoint.json
 
-# ... developer modifies some files ...
+# View checkpoint contents
+$ jq '.execution_state.scan_results | length' checkpoint.json
+1823
 
-# Re-run (only processes changed files)
-$ bazelbump recipe run autoload-migration
-==> Incremental run (baseline: run-abc123)
-==> Scanning for changes...
-==> 12 files changed since last run
-==> Processing changed files...
-==> Completed! 8 files modified.
-```
-
-### 12.3 Viewing History
-
-```bash
-$ bazelbump history --since 7d
-
-Recent Runs:
-ID              Recipe              Status       Files    Duration   When
-─────────────────────────────────────────────────────────────────────────────
-run-abc123      autoload-migration  completed    893/893  8m 34s     2h ago
-run-xyz789      flag-cleanup        completed    5/5      1.2s       1d ago
-run-def456      autoload-migration  failed       234/893  2m 12s     3d ago
-
-$ bazelbump history --run run-def456
-
-Run: run-def456
-  Recipe:    autoload-migration v2.0.0
-  Status:    failed
-  Started:   2026-01-31 10:15:00
-  Duration:  2m 12s
-  Progress:  234/893 files
-  Error:     "source/BUILD:15: syntax error"
-  
-  Checkpoints:
-    - cp-001: auto at file 100 (10:16:00)
-    - cp-002: auto at file 200 (10:17:00)
-  
-  Files modified: 187
-  Files failed: 1
+# Export run state
+$ bazelbump status --export run-state.json
 ```
 
 ---
 
-## 13. Migration Plan
+## 13. Implementation Checklist
 
-| Phase | Scope | Timeline |
-|-------|-------|----------|
-| 1 | Core state management (SQLite, schema) | Week 1-2 |
-| 2 | Checkpoint create/restore | Week 3-4 |
-| 3 | Progress reporting | Week 5 |
-| 4 | CLI commands (status, history, checkpoint) | Week 6 |
-| 5 | Incremental execution | Week 7-8 |
-| 6 | Testing on Envoy-scale projects | Week 9-10 |
+### Phase 1: Core State Management
+- [x] SQLite schema with durability settings
+- [x] State manager interface
+- [x] SQLite implementation with `synchronous=FULL`
+- [x] No-op implementation for `nostate` build
+- [ ] Cross-platform file locking (gofrs/flock)
+- [ ] Orphaned run detection on startup
+- [ ] Batched writes implementation
+
+### Phase 2: Checkpointing
+- [ ] Checkpoint create/restore
+- [ ] Checkpoint size limits and cleanup
+- [ ] Recipe hash for cache invalidation
+- [ ] Atomic file updates
+
+### Phase 3: Progress and CLI
+- [ ] Progress reporter implementations
+- [ ] Enhanced CLI commands
+- [ ] JSON export for debugging
+
+### Phase 4: Integration
+- [ ] Executor integration
+- [ ] Resume semantics
+- [ ] Incremental execution
+
+### Phase 5: Testing
+- [ ] Unit tests for all components
+- [ ] Integration tests on Envoy-scale project
+- [ ] Performance benchmarks
+
+---
+
+## Appendix A: Design Rationale and Benchmarks
+
+### A.1 Industry Solutions Comparison
+
+| Feature | bazelbump | Temporal | DBOS | Prefect | Airflow | Bazel |
+|---------|-----------|----------|------|---------|---------|-------|
+| Automatic Checkpointing | Interval-based | Every activity | Every step | Result caching | Task-level | Action cache |
+| Exactly-Once | No (at-least-once) | Yes (via replay) | Yes (via txn) | Yes (via cache) | No | Yes (cache key) |
+| Distributed State | No | Yes | Yes | Yes (optional) | Yes | Yes (remote cache) |
+| Event History | Event log table | Full | Full | Partial | Full | No |
+| Resume Granularity | File-level | Activity-level | Step-level | Task-level | Task-level | Action-level |
+| Storage Backend | SQLite | Cassandra/SQL | Postgres | Postgres/S3 | SQL | Custom binary |
+| Complexity | Low | High | Medium | Medium | High | High |
+
+### A.2 Storage Approach Comparison
+
+| Approach | Atomicity | Query Flexibility | Debugging | Portability |
+|----------|-----------|-------------------|-----------|-------------|
+| SQLite-only | ACID transactions | Full SQL | Requires tools | Better |
+| JSON files | File-level only | Load + filter | Human-readable | FS edge cases |
+| Hybrid | Mixed | Mixed | Best of both | Complex |
+
+**Decision**: SQLite-only with JSON export for debugging.
+
+### A.3 Temporal.io Insights
+
+Temporal's "durable execution" model captures every state transition automatically, eliminating manual checkpoint placement decisions. Key insight: add an event log for debugging and audit:
+
+```sql
+CREATE TABLE event_log (
+    id INTEGER PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    timestamp TIMESTAMP,
+    event_type TEXT NOT NULL,
+    event_data JSON
+);
+```
+
+**Reference**: [Temporal Workflow Documentation](https://docs.temporal.io/workflows)
+
+### A.4 DBOS Insights
+
+DBOS achieves exactly-once semantics by executing the step AND its checkpoint in a single transaction. For file operations (which have side effects), we use upsert patterns for idempotent state updates:
+
+```sql
+INSERT INTO file_states (run_id, file_path, status, ...)
+VALUES (?, ?, ?, ...)
+ON CONFLICT(run_id, file_path) DO UPDATE SET
+    status = excluded.status,
+    ...
+WHERE status != 'completed'
+```
+
+**Reference**: [DBOS Architecture](https://docs.dbos.dev/architecture)
+
+### A.5 Prefect Insights
+
+Prefect distinguishes between "Running" and "Retrying" states, helping users understand recovery. We add `retry_count` and the "retrying" state:
+
+```sql
+ALTER TABLE runs ADD COLUMN retry_count INTEGER DEFAULT 0;
+```
+
+**Reference**: [Prefect States Documentation](https://docs.prefect.io/v3/concepts/states)
+
+### A.6 SQLite WAL Mode Analysis
+
+**Critical**: With `synchronous=NORMAL` (the default), transactions can be lost on power failure. WAL mode is not crash-safe without `synchronous=FULL`:
+
+| Setting | Durability | Performance |
+|---------|------------|-------------|
+| `synchronous=OFF` | May lose data | Fastest |
+| `synchronous=NORMAL` | May lose on power fail | Fast |
+| `synchronous=FULL` | Durable | ~2x slower |
+
+For a checkpointing system, durability is critical. We use `synchronous=FULL`.
+
+**Reference**: [SQLite WAL Mode](https://sqlite.org/wal.html)
+
+### A.7 Bazel Cache Key Insights
+
+Bazel's action cache includes both input hashes AND action definition. This means changing the "recipe" invalidates the cache even if files haven't changed.
+
+We add `recipe_hash` to runs and check it during incremental execution.
+
+**Reference**: [Bazel Persistent Action Cache](https://sluongng.hashnode.dev/bazel-caching-explained-pt-4-persistent-action-cache)
+
+### A.8 Git Content-Addressed Storage (Future)
+
+For non-git repos, content-addressed storage enables:
+- Deduplication across runs
+- Efficient undo without git
+- Proof of what was changed
+
+This is a v2 feature.
+
+**Reference**: [Git Objects](https://git-scm.com/book/en/v2/Git-Internals-Git-Objects)
 
 ---
 
 ## References
 
 - [SQLite WAL Mode](https://www.sqlite.org/wal.html)
-- [Terraform State Management](https://developer.hashicorp.com/terraform/language/state)
-- [rsync Algorithm](https://rsync.samba.org/tech_report/)
+- [Temporal Workflow Documentation](https://docs.temporal.io/workflows)
+- [DBOS Architecture](https://docs.dbos.dev/architecture)
+- [Prefect States Documentation](https://docs.prefect.io/v3/concepts/states)
+- [Bazel Persistent Action Cache](https://sluongng.hashnode.dev/bazel-caching-explained-pt-4-persistent-action-cache)
+- [gofrs/flock - Cross-platform file locking](https://github.com/gofrs/flock)
 - [xxHash](https://cyan4973.github.io/xxHash/)
