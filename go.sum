@@ -2,6 +2,8 @@ cloud.google.com/go v0.26.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMT
 github.com/360EntSecGroup-Skylar/excelize v1.4.1/go.mod h1:vnax29X2usfl7HHkBrX5EvSCJcmH3dT9luvxzu8iGAE=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/PuerkitoBio/goquery v1.5.1/go.mod h1:GsLWisAFVj4WgDibEWF4pvYnkVQBpKBKeU+7zCJoLcc=
+github.com/albertocavalcante/go-bcr v0.0.0-20260204163957-982d6f58e550 h1:4bzTYx/1Y/jpEBpdCj5M6YcD65U2TCnnggKjzUYONCs=
+github.com/albertocavalcante/go-bcr v0.0.0-20260204163957-982d6f58e550/go.mod h1:9uzeZFsC9JA97oLcvh6pgMwqI0hFwpWHFmKTOfMA/K0=
 github.com/albertocavalcante/starlark-syntax-go v0.0.0-20260204124100-a0f90b3b04d8 h1:nYKuJytEyTdhfmDryI9rlYjj63eRYGKX0UNb00CxC9k=
 github.com/albertocavalcante/starlark-syntax-go v0.0.0-20260204124100-a0f90b3b04d8/go.mod h1:OmeqU3wKeP2GDZx74Gh91px4596Lfrn714W8401eYRw=
 github.com/andybalholm/cascadia v1.1.0/go.mod h1:GsXiBklL0woXo1j/WYWtSYYC4ouU9PqHO0sqidkEA4Y=

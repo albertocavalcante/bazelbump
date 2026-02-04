@@ -101,6 +101,15 @@ func AllBuiltinDocs() []BuiltinDoc {
 		docFlagsIncompatible(),
 		docFlagsDeprecated(),
 
+		// Modules - bcr
+		docBcrMetadata(),
+		docBcrSource(),
+		docBcrLatest(),
+		docBcrVersions(),
+		docBcrExists(),
+		docBcrVersionExists(),
+		docBcrIsYanked(),
+
 		// File I/O (DEPRECATED - use fs module)
 		docReadFile(),
 		docFileExists(),
@@ -1547,5 +1556,165 @@ func docFlagsDeprecated() BuiltinDoc {
 for flag in deprecated:
     print("Consider removing:", flag.name)`,
 		SeeAlso: []string{"flags.incompatible", "flags.diff"},
+	}
+}
+
+// --- BCR Module Documentation ---
+
+func docBcrMetadata() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "bcr.metadata",
+		Category:    "module-bcr",
+		Signature:   "bcr.metadata(module)",
+		Description: "Get metadata for a module from the Bazel Central Registry",
+		Args: []ArgDoc{
+			{Name: "module", Type: "str", Required: true, Description: "Module name (e.g., 'rules_go')"},
+		},
+		Behavior: []string{
+			"Returns struct with versions, yanked_versions, maintainers, homepage, repository, latest",
+			"Requires BCR client to be configured",
+			"Makes HTTP request to registry (cached)",
+		},
+		Example: `meta = bcr.metadata("rules_go")
+print("Latest version:", meta.latest)
+print("Available:", len(meta.versions), "versions")
+for m in meta.maintainers:
+    print("Maintainer:", m.name, m.github)`,
+		SeeAlso: []string{"bcr.latest", "bcr.versions"},
+	}
+}
+
+func docBcrSource() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "bcr.source",
+		Category:    "module-bcr",
+		Signature:   "bcr.source(module, version)",
+		Description: "Get source information for a specific module version",
+		Args: []ArgDoc{
+			{Name: "module", Type: "str", Required: true, Description: "Module name"},
+			{Name: "version", Type: "str", Required: true, Description: "Version string"},
+		},
+		Behavior: []string{
+			"Returns struct with type, url, integrity, strip_prefix, patches, patch_strip",
+			"type is 'archive' by default",
+			"integrity is the SRI hash for verification",
+		},
+		Example: `src = bcr.source("rules_go", "0.50.1")
+print("Download URL:", src.url)
+print("Integrity:", src.integrity)
+if src.patches:
+    print("Has", len(src.patches), "patches")`,
+		SeeAlso: []string{"bcr.metadata", "bcr.latest"},
+	}
+}
+
+func docBcrLatest() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "bcr.latest",
+		Category:    "module-bcr",
+		Signature:   "bcr.latest(module)",
+		Description: "Get the latest non-yanked version of a module",
+		Args: []ArgDoc{
+			{Name: "module", Type: "str", Required: true, Description: "Module name"},
+		},
+		Behavior: []string{
+			"Returns the latest version that is not yanked",
+			"Raises error if module not found or all versions yanked",
+		},
+		Example: `latest = bcr.latest("rules_go")
+print("Latest rules_go:", latest)
+
+# Use in ensure_bazel_dep
+ensure_bazel_dep(name = "rules_go", version = bcr.latest("rules_go"))`,
+		SeeAlso: []string{"bcr.versions", "bcr.is_yanked"},
+	}
+}
+
+func docBcrVersions() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "bcr.versions",
+		Category:    "module-bcr",
+		Signature:   "bcr.versions(module)",
+		Description: "Get all available versions of a module",
+		Args: []ArgDoc{
+			{Name: "module", Type: "str", Required: true, Description: "Module name"},
+		},
+		Behavior: []string{
+			"Returns list of all version strings",
+			"Includes yanked versions (use bcr.is_yanked to check)",
+			"Ordered as in registry (typically oldest first)",
+		},
+		Example: `versions = bcr.versions("rules_go")
+print("Available versions:", versions)
+
+# Filter to recent versions
+recent = [v for v in versions if version.at_least(v, "0.40.0")]`,
+		SeeAlso: []string{"bcr.metadata", "bcr.latest"},
+	}
+}
+
+func docBcrExists() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "bcr.exists",
+		Category:    "module-bcr",
+		Signature:   "bcr.exists(module)",
+		Description: "Check if a module exists in the registry",
+		Args: []ArgDoc{
+			{Name: "module", Type: "str", Required: true, Description: "Module name"},
+		},
+		Behavior: []string{
+			"Returns True if module exists, False otherwise",
+			"Does not raise error for non-existent modules",
+		},
+		Example: `if bcr.exists("rules_go"):
+    print("rules_go is available in BCR")
+else:
+    print("rules_go not found")`,
+		SeeAlso: []string{"bcr.version_exists", "bcr.metadata"},
+	}
+}
+
+func docBcrVersionExists() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "bcr.version_exists",
+		Category:    "module-bcr",
+		Signature:   "bcr.version_exists(module, version)",
+		Description: "Check if a specific version exists",
+		Args: []ArgDoc{
+			{Name: "module", Type: "str", Required: true, Description: "Module name"},
+			{Name: "version", Type: "str", Required: true, Description: "Version string"},
+		},
+		Behavior: []string{
+			"Returns True if version exists (even if yanked)",
+			"Returns False if module or version not found",
+		},
+		Example: `if bcr.version_exists("rules_go", "0.50.1"):
+    print("Version 0.50.1 is available")`,
+		SeeAlso: []string{"bcr.exists", "bcr.is_yanked"},
+	}
+}
+
+func docBcrIsYanked() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "bcr.is_yanked",
+		Category:    "module-bcr",
+		Signature:   "bcr.is_yanked(module, version)",
+		Description: "Check if a version is yanked (deprecated/broken)",
+		Args: []ArgDoc{
+			{Name: "module", Type: "str", Required: true, Description: "Module name"},
+			{Name: "version", Type: "str", Required: true, Description: "Version string"},
+		},
+		Behavior: []string{
+			"Returns True if version is yanked",
+			"Yanked versions should not be used",
+			"bcr.latest automatically skips yanked versions",
+		},
+		Example: `if bcr.is_yanked("rules_go", "0.49.0"):
+    print("Version 0.49.0 is yanked, use a different version")
+
+# Get yank reason from metadata
+meta = bcr.metadata("rules_go")
+reason = meta.yanked_versions.get("0.49.0", "")`,
+		SeeAlso: []string{"bcr.latest", "bcr.metadata"},
 	}
 }

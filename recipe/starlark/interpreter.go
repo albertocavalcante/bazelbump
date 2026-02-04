@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/albertocavalcante/bazelbump/flagdb"
+	"github.com/albertocavalcante/go-bcr"
 	"github.com/qri-io/starlib/re"
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
@@ -53,6 +54,9 @@ type Interpreter struct {
 
 	// flagDB is the optional flag database for the flags module.
 	flagDB *flagdb.DB
+
+	// bcrClient is the optional BCR client for the bcr module.
+	bcrClient *bcr.Client
 }
 
 // loadCacheEntry holds a cached loaded module.
@@ -84,6 +88,14 @@ func WithProjectPath(path string) InterpreterOption {
 func WithFlagDB(db *flagdb.DB) InterpreterOption {
 	return func(i *Interpreter) {
 		i.flagDB = db
+	}
+}
+
+// WithBCRClient sets the BCR client for the bcr module.
+// If not set, the bcr module will return errors when called.
+func WithBCRClient(client *bcr.Client) InterpreterOption {
+	return func(i *Interpreter) {
+		i.bcrClient = client
 	}
 }
 
@@ -175,6 +187,9 @@ func (i *Interpreter) makeBuiltins() starlark.StringDict {
 
 		// flags module - Bazel flag database
 		"flags": makeFlagsModule(i.flagDB),
+
+		// bcr module - Bazel Central Registry client
+		"bcr": makeBcrModule(i.bcrClient),
 
 		// =========================================================================
 		// Deprecated global builtins (backwards compatibility)
