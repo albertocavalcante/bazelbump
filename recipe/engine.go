@@ -9,7 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+
+	"github.com/albertocavalcante/bazelbump/ast"
 )
 
 // Engine executes recipes.
@@ -422,25 +425,15 @@ func (e *Engine) ensureLoadStatements(ctx *Context, file string, rules []Detecte
 		return nil, nil
 	}
 
-	lines := strings.Split(string(content), "\n")
-
-	// Find insertion point (after existing loads, or at top)
-	insertIdx := 0
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "load(") {
-			insertIdx = i + 1
-		} else if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-			// First non-load, non-comment line
-			if insertIdx == 0 {
-				insertIdx = i
-			}
-			break
-		}
+	// Parse with AST for correct multi-line load handling
+	f, err := ast.ParseFileContent(file, content)
+	if err != nil {
+		// If AST parsing fails, skip this file
+		return nil, nil
 	}
 
-	// Generate load statements
-	var newLoads []string
+	// Apply AST operations for each needed load
+	anyModified := false
 	for loadPath, ruleNames := range neededLoads {
 		// Deduplicate rules
 		seen := make(map[string]bool)
@@ -451,23 +444,32 @@ func (e *Engine) ensureLoadStatements(ctx *Context, file string, rules []Detecte
 				unique = append(unique, r)
 			}
 		}
+		sort.Strings(unique)
 
-		// Create load statement
-		quotedRules := make([]string, len(unique))
-		for i, r := range unique {
-			quotedRules[i] = fmt.Sprintf(`"%s"`, r)
+		modified, err := ast.EnsureLoad(f, ast.EnsureLoadOptions{
+			Module:   loadPath,
+			Symbols:  unique,
+			Position: ast.LoadPositionTop,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("ensure_load in %s: %w", file, err)
 		}
-		load := fmt.Sprintf(`load("%s", %s)`, loadPath, strings.Join(quotedRules, ", "))
-		newLoads = append(newLoads, load)
+		if modified {
+			anyModified = true
+		}
 	}
 
-	// Insert load statements
-	newLines := make([]string, 0, len(lines)+len(newLoads))
-	newLines = append(newLines, lines[:insertIdx]...)
-	newLines = append(newLines, newLoads...)
-	newLines = append(newLines, lines[insertIdx:]...)
+	if !anyModified {
+		return nil, nil
+	}
 
-	newContent := []byte(strings.Join(newLines, "\n"))
+	// Format output
+	newContent := f.Format()
+
+	// Validate output is valid Starlark (re-parse to check syntax)
+	if _, err := ast.ParseFileContent(file, newContent); err != nil {
+		return nil, fmt.Errorf("invalid output for %s: %w", file, err)
+	}
 
 	change := &FileChange{
 		Path:        file,
