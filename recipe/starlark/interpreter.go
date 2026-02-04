@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/albertocavalcante/bazelbump/flagdb"
 	"github.com/qri-io/starlib/re"
 	"go.starlark.net/starlark"
 	"go.starlark.net/starlarkstruct"
@@ -49,6 +50,9 @@ type Interpreter struct {
 	// projectPath is the root directory of the project being analyzed.
 	// Used for resolving relative paths in file operations.
 	projectPath string
+
+	// flagDB is the optional flag database for the flags module.
+	flagDB *flagdb.DB
 }
 
 // loadCacheEntry holds a cached loaded module.
@@ -72,6 +76,14 @@ func WithSearchPaths(paths ...string) InterpreterOption {
 func WithProjectPath(path string) InterpreterOption {
 	return func(i *Interpreter) {
 		i.projectPath = path
+	}
+}
+
+// WithFlagDB sets the flag database for the flags module.
+// If not set, the flags module will return errors when called.
+func WithFlagDB(db *flagdb.DB) InterpreterOption {
+	return func(i *Interpreter) {
+		i.flagDB = db
 	}
 }
 
@@ -107,6 +119,9 @@ func NewInterpreter(opts ...InterpreterOption) *Interpreter {
 
 // makeBuiltins creates the predeclared functions for the recipe DSL.
 func (i *Interpreter) makeBuiltins() starlark.StringDict {
+	// Reset deprecation warnings for this new recipe execution
+	resetDeprecationWarnings()
+
 	builtins := starlark.StringDict{
 		// Core recipe function
 		"recipe": starlark.NewBuiltin("recipe", i.builtinRecipe),
@@ -145,26 +160,45 @@ func (i *Interpreter) makeBuiltins() starlark.StringDict {
 		// Struct constructor for custom types
 		"struct": starlark.NewBuiltin("struct", starlarkstruct.Make),
 
-		// BUILD file parsing builtins
-		"parse_build_file": starlark.NewBuiltin("parse_build_file", builtinParseBuildFile(i.projectPath)),
+		// =========================================================================
+		// Namespaced modules (new API)
+		// =========================================================================
 
-		// File I/O builtins (sandboxed to project directory)
-		"read_file":   starlark.NewBuiltin("read_file", i.builtinReadFile),
-		"file_exists": starlark.NewBuiltin("file_exists", i.builtinFileExists),
-		"list_dir":    starlark.NewBuiltin("list_dir", i.builtinListDir),
-		"glob":        starlark.NewBuiltin("glob", i.builtinGlob),
+		// project module - project context functions
+		"project": i.makeProjectModule(),
 
-		// Project context builtins
-		"get_project_context":     starlark.NewBuiltin("get_project_context", i.builtinGetProjectContext),
-		"get_bazel_deps":          starlark.NewBuiltin("get_bazel_deps", i.builtinGetBazelDeps),
-		"get_bazel_compatibility": starlark.NewBuiltin("get_bazel_compatibility", i.builtinGetBazelCompatibility),
+		// version module - version parsing and comparison
+		"version": makeVersionModule(),
 
-		// Version builtins
-		"version_matches":  starlark.NewBuiltin("version_matches", builtinVersionMatches),
-		"version_compare":  starlark.NewBuiltin("version_compare", builtinVersionCompare),
-		"parse_version":    starlark.NewBuiltin("parse_version", builtinParseVersion),
-		"version_at_least": starlark.NewBuiltin("version_at_least", builtinVersionAtLeast),
-		"version_in_range": starlark.NewBuiltin("version_in_range", builtinVersionInRange),
+		// fs module - file system operations
+		"fs": i.makeFsModule(),
+
+		// flags module - Bazel flag database
+		"flags": makeFlagsModule(i.flagDB),
+
+		// =========================================================================
+		// Deprecated global builtins (backwards compatibility)
+		// These will be removed in v2.0. Use namespaced modules instead.
+		// =========================================================================
+
+		// File I/O builtins - DEPRECATED: use fs.* instead
+		"read_file":        deprecatedBuiltinMethod("read_file", "fs.read", i, i.builtinReadFile),
+		"file_exists":      deprecatedBuiltinMethod("file_exists", "fs.exists", i, i.builtinFileExists),
+		"list_dir":         deprecatedBuiltinMethod("list_dir", "fs.list_dir", i, i.builtinListDir),
+		"glob":             deprecatedBuiltinMethod("glob", "fs.glob", i, i.builtinGlob),
+		"parse_build_file": deprecatedBuiltin("parse_build_file", "fs.parse_build", builtinParseBuildFile(i.projectPath)),
+
+		// Project context builtins - DEPRECATED: use project.* instead
+		"get_project_context":     deprecatedBuiltinMethod("get_project_context", "project.context", i, i.builtinGetProjectContext),
+		"get_bazel_deps":          deprecatedBuiltinMethod("get_bazel_deps", "project.deps", i, i.builtinGetBazelDeps),
+		"get_bazel_compatibility": deprecatedBuiltinMethod("get_bazel_compatibility", "project.compatibility", i, i.builtinGetBazelCompatibility),
+
+		// Version builtins - DEPRECATED: use version.* instead
+		"version_matches":  deprecatedBuiltin("version_matches", "version.matches", builtinVersionMatches),
+		"version_compare":  deprecatedBuiltin("version_compare", "version.compare", builtinVersionCompare),
+		"parse_version":    deprecatedBuiltin("parse_version", "version.parse", builtinParseVersion),
+		"version_at_least": deprecatedBuiltin("version_at_least", "version.at_least", builtinVersionAtLeast),
+		"version_in_range": deprecatedBuiltin("version_in_range", "version.in_range", builtinVersionInRange),
 	}
 
 	// Add the starlib regex module as a predeclared global.

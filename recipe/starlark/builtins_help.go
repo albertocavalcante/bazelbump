@@ -75,19 +75,45 @@ func AllBuiltinDocs() []BuiltinDoc {
 		docDeleteFile(),
 		docRunCommand(),
 
-		// File I/O
+		// Modules - project
+		docProjectContext(),
+		docProjectDeps(),
+		docProjectCompatibility(),
+
+		// Modules - version
+		docVersionParse(),
+		docVersionCompareModule(),
+		docVersionMatchesModule(),
+		docVersionAtLeastModule(),
+		docVersionInRangeModule(),
+
+		// Modules - fs
+		docFsRead(),
+		docFsExists(),
+		docFsGlob(),
+		docFsListDir(),
+		docFsParseBuild(),
+
+		// Modules - flags
+		docFlagsExists(),
+		docFlagsGet(),
+		docFlagsDiff(),
+		docFlagsIncompatible(),
+		docFlagsDeprecated(),
+
+		// File I/O (DEPRECATED - use fs module)
 		docReadFile(),
 		docFileExists(),
 		docGlob(),
 		docListDir(),
 		docParseBuildFile(),
 
-		// Project Context
+		// Project Context (DEPRECATED - use project module)
 		docGetProjectContext(),
 		docGetBazelDeps(),
 		docGetBazelCompatibility(),
 
-		// Version Utilities
+		// Version Utilities (DEPRECATED - use version module)
 		docVersionMatches(),
 		docVersionCompare(),
 		docParseVersion(),
@@ -131,7 +157,12 @@ func GetBuiltinsByCategory(category string) []BuiltinDoc {
 
 // BuiltinCategories returns all available categories in display order.
 func BuiltinCategories() []string {
-	return []string{"step", "operation", "fileio", "context", "version", "util", "regex"}
+	return []string{
+		"step", "operation",
+		"module-project", "module-version", "module-fs", "module-flags",
+		"fileio", "context", "version",
+		"util", "regex",
+	}
 }
 
 // CategoryDisplayName returns the display name for a category.
@@ -141,12 +172,20 @@ func CategoryDisplayName(category string) string {
 		return "STEPS"
 	case "operation":
 		return "OPERATIONS"
+	case "module-project":
+		return "PROJECT MODULE (project.*)"
+	case "module-version":
+		return "VERSION MODULE (version.*)"
+	case "module-fs":
+		return "FILESYSTEM MODULE (fs.*)"
+	case "module-flags":
+		return "FLAGS MODULE (flags.*)"
 	case "fileio":
-		return "FILE I/O"
+		return "FILE I/O (DEPRECATED)"
 	case "context":
-		return "PROJECT CONTEXT"
+		return "PROJECT CONTEXT (DEPRECATED)"
 	case "version":
-		return "VERSION UTILITIES"
+		return "VERSION UTILITIES (DEPRECATED)"
 	case "util":
 		return "UTILITIES"
 	case "regex":
@@ -1086,5 +1125,427 @@ if version_in_range(ctx.bazel_version, "7.0.0", "7.99.99"):
 if not version_in_range(ctx.bazel_version, "7.0.0", "9.0.0"):
     fail("This recipe only supports Bazel 7.x to 9.x")`,
 		SeeAlso: []string{"version_at_least", "version_compare", "version_matches"},
+	}
+}
+
+// =============================================================================
+// Project Module (project.*)
+// =============================================================================
+
+func docProjectContext() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "project.context",
+		Category:    "module-project",
+		Signature:   "project.context()",
+		Description: "Get project context information (memoized per run)",
+		Args:        []ArgDoc{},
+		Behavior: []string{
+			"Detects project root, Bazel version, and module configuration",
+			"Results are cached for the duration of the recipe execution",
+			"Requires project path to be set (automatic when running recipes)",
+		},
+		Example: `ctx = project.context()
+if ctx.use_bzlmod:
+    print("Using bzlmod at", ctx.root)
+if ctx.bazel_version:
+    print("Bazel version:", ctx.bazel_version)`,
+		SeeAlso: []string{"project.deps", "project.compatibility", "version.at_least"},
+	}
+}
+
+func docProjectDeps() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "project.deps",
+		Category:    "module-project",
+		Signature:   "project.deps()",
+		Description: "Get list of bazel_dep() entries from MODULE.bazel",
+		Args:        []ArgDoc{},
+		Behavior: []string{
+			"Parses MODULE.bazel and extracts all bazel_dep entries",
+			"Returns empty list if MODULE.bazel doesn't exist",
+			"Each entry is a dict with name, version, repo_name, dev_dependency",
+		},
+		Example: `deps = project.deps()
+for dep in deps:
+    print(dep["name"], "at version", dep["version"])
+    if dep["dev_dependency"]:
+        print("  (dev dependency)")`,
+		SeeAlso: []string{"project.context", "ensure_bazel_dep"},
+	}
+}
+
+func docProjectCompatibility() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "project.compatibility",
+		Category:    "module-project",
+		Signature:   "project.compatibility()",
+		Description: "Get bazel_compatibility constraints from MODULE.bazel",
+		Args:        []ArgDoc{},
+		Behavior: []string{
+			"Extracts the bazel_compatibility attribute from module()",
+			"Returns list of constraint strings (BCR format)",
+			"Returns empty list if no compatibility constraints defined",
+		},
+		Example: `compat = project.compatibility()
+# compat might be [">=6.4.0", "<=9.0.0", "-7.1.0"]
+ctx = project.context()
+if ctx.bazel_version and not version.matches(ctx.bazel_version, compat):
+    fail("Project Bazel version doesn't match compatibility constraints")`,
+		SeeAlso: []string{"project.context", "version.matches"},
+	}
+}
+
+// =============================================================================
+// Version Module (version.*)
+// =============================================================================
+
+func docVersionParse() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "version.parse",
+		Category:    "module-version",
+		Signature:   "version.parse(s)",
+		Description: "Parse version string into components",
+		Args: []ArgDoc{
+			{Name: "s", Type: "str", Required: true, Description: "Version string to parse"},
+		},
+		Behavior: []string{
+			"Returns struct with major, minor, patch, prerelease, and string fields",
+			"Supports semver format with optional prerelease suffix",
+			"Raises error for invalid version strings",
+		},
+		Example: `v = version.parse("7.0.0-rc1")
+v.major       # 7
+v.minor       # 0
+v.patch       # 0
+v.prerelease  # "rc1"
+v.string      # "7.0.0-rc1"
+
+# Check major version
+if version.parse(ctx.bazel_version).major >= 8:
+    print("Running on Bazel 8+")`,
+		SeeAlso: []string{"version.compare", "version.matches"},
+	}
+}
+
+func docVersionCompareModule() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "version.compare",
+		Category:    "module-version",
+		Signature:   "version.compare(v1, v2)",
+		Description: "Compare two version strings",
+		Args: []ArgDoc{
+			{Name: "v1", Type: "str", Required: true, Description: "First version string"},
+			{Name: "v2", Type: "str", Required: true, Description: "Second version string"},
+		},
+		Behavior: []string{
+			"Returns -1 if v1 < v2",
+			"Returns 0 if v1 == v2",
+			"Returns 1 if v1 > v2",
+			"Handles prerelease versions (e.g., 7.0.0-rc1 < 7.0.0)",
+		},
+		Example: `version.compare("7.0.0", "8.0.0")  # -1
+version.compare("8.0.0", "7.0.0")  # 1
+version.compare("7.0.0", "7.0.0")  # 0`,
+		SeeAlso: []string{"version.matches", "version.at_least", "version.parse"},
+	}
+}
+
+func docVersionMatchesModule() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "version.matches",
+		Category:    "module-version",
+		Signature:   "version.matches(version, constraints)",
+		Description: "Check if version satisfies BCR-style constraints",
+		Args: []ArgDoc{
+			{Name: "version", Type: "str", Required: true, Description: "Version string to check (e.g., \"7.7.1\")"},
+			{Name: "constraints", Type: "list[str]", Required: true, Description: "List of constraint strings"},
+		},
+		Behavior: []string{
+			"Supports BCR constraint operators: >=, <=, >, <, ==, !=",
+			"Supports exclusion with - prefix (e.g., \"-7.1.0\")",
+			"All constraints must match for the result to be True",
+			"Empty constraints list returns True (matches everything)",
+		},
+		Example: `# Check against compatibility constraints
+version.matches("7.7.1", [">=6.4.0", "<=9.0.0"])  # True
+version.matches("7.1.0", [">=6.4.0", "-7.1.0"])   # False (excluded)
+version.matches("5.0.0", [">=6.4.0"])             # False`,
+		SeeAlso: []string{"version.compare", "version.at_least", "project.compatibility"},
+	}
+}
+
+func docVersionAtLeastModule() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "version.at_least",
+		Category:    "module-version",
+		Signature:   "version.at_least(version, minimum)",
+		Description: "Check if version >= minimum",
+		Args: []ArgDoc{
+			{Name: "version", Type: "str", Required: true, Description: "Version string to check"},
+			{Name: "minimum", Type: "str", Required: true, Description: "Minimum required version"},
+		},
+		Behavior: []string{
+			"Returns True if version >= minimum",
+			"Equivalent to version.compare(version, minimum) >= 0",
+			"Useful for prerequisite checks",
+		},
+		Example: `ctx = project.context()
+if not version.at_least(ctx.bazel_version, "8.0.0"):
+    fail("This recipe requires Bazel 8.0.0 or later")`,
+		SeeAlso: []string{"version.in_range", "version.compare", "version.matches"},
+	}
+}
+
+func docVersionInRangeModule() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "version.in_range",
+		Category:    "module-version",
+		Signature:   "version.in_range(version, min, max)",
+		Description: "Check if min <= version <= max",
+		Args: []ArgDoc{
+			{Name: "version", Type: "str", Required: true, Description: "Version string to check"},
+			{Name: "min", Type: "str", Required: true, Description: "Minimum version (inclusive)"},
+			{Name: "max", Type: "str", Required: true, Description: "Maximum version (inclusive)"},
+		},
+		Behavior: []string{
+			"Returns True if min <= version <= max",
+			"Both min and max are inclusive bounds",
+			"Useful for checking compatibility ranges",
+		},
+		Example: `ctx = project.context()
+
+# Check if running on Bazel 7.x
+if version.in_range(ctx.bazel_version, "7.0.0", "7.99.99"):
+    print("Running on Bazel 7.x")`,
+		SeeAlso: []string{"version.at_least", "version.compare", "version.matches"},
+	}
+}
+
+// =============================================================================
+// Filesystem Module (fs.*)
+// =============================================================================
+
+func docFsRead() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "fs.read",
+		Category:    "module-fs",
+		Signature:   "fs.read(path, default=None)",
+		Description: "Read file contents as string",
+		Args: []ArgDoc{
+			{Name: "path", Type: "str", Required: true, Description: "Path to the file (relative to project)"},
+			{Name: "default", Type: "str", Required: false, Description: "Default value if file doesn't exist"},
+		},
+		Behavior: []string{
+			"Returns file contents as a string",
+			"If file doesn't exist and default is provided, returns default",
+			"If file doesn't exist and no default, raises an error",
+			"Path is sandboxed to project directory",
+		},
+		Example: `content = fs.read("MODULE.bazel")
+version = fs.read(".bazel-version", default="7.0.0")`,
+		SeeAlso: []string{"fs.exists", "fs.glob"},
+	}
+}
+
+func docFsExists() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "fs.exists",
+		Category:    "module-fs",
+		Signature:   "fs.exists(path)",
+		Description: "Check if file or directory exists",
+		Args: []ArgDoc{
+			{Name: "path", Type: "str", Required: true, Description: "Path to check (relative to project)"},
+		},
+		Behavior: []string{
+			"Returns True if the file or directory exists",
+			"Returns False otherwise",
+			"Path is sandboxed to project directory",
+		},
+		Example: `if fs.exists("MODULE.bazel"):
+    # Running with bzlmod
+    pass`,
+		SeeAlso: []string{"fs.read", "fs.glob"},
+	}
+}
+
+func docFsGlob() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "fs.glob",
+		Category:    "module-fs",
+		Signature:   "fs.glob(pattern, exclude=[])",
+		Description: "Find files matching a glob pattern",
+		Args: []ArgDoc{
+			{Name: "pattern", Type: "str", Required: true, Description: "Glob pattern (supports **)"},
+			{Name: "exclude", Type: "list", Required: false, Description: "Patterns to exclude"},
+		},
+		Behavior: []string{
+			"Returns list of matching file paths (relative to project)",
+			"** matches any number of directories",
+			"Hidden directories (starting with .) are skipped",
+			"Path is sandboxed to project directory",
+		},
+		Example: `build_files = fs.glob("**/BUILD")
+star_files = fs.glob("**/*.star", exclude=["**/test_*.star"])`,
+		SeeAlso: []string{"fs.list_dir", "fs.exists"},
+	}
+}
+
+func docFsListDir() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "fs.list_dir",
+		Category:    "module-fs",
+		Signature:   "fs.list_dir(path, recursive=False)",
+		Description: "List directory contents",
+		Args: []ArgDoc{
+			{Name: "path", Type: "str", Required: true, Description: "Directory path (relative to project)"},
+			{Name: "recursive", Type: "bool", Required: false, Description: "Include subdirectories (default: False)"},
+		},
+		Behavior: []string{
+			"Returns list of file/directory names",
+			"If recursive=True, returns relative paths for all files",
+			"Path is sandboxed to project directory",
+		},
+		Example: `entries = fs.list_dir("src")
+all_files = fs.list_dir(".", recursive=True)`,
+		SeeAlso: []string{"fs.glob", "fs.exists"},
+	}
+}
+
+func docFsParseBuild() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "fs.parse_build",
+		Category:    "module-fs",
+		Signature:   "fs.parse_build(path)",
+		Description: "Parse a BUILD file and return structure",
+		Args: []ArgDoc{
+			{Name: "path", Type: "str", Required: true, Description: "Path to BUILD file"},
+		},
+		Behavior: []string{
+			"Returns a BuildFile object with rules() and loads() methods",
+			"rules(kind=None) returns list of rules, optionally filtered by kind",
+			"loads() returns list of load statements",
+			"Each rule has: name, kind, line, attr(name) method",
+		},
+		Example: `bf = fs.parse_build("src/BUILD")
+for rule in bf.rules("cc_*"):
+    print(rule.name, rule.kind)
+for load in bf.loads():
+    print(load.path, load.symbols)`,
+		SeeAlso: []string{"ensure_load", "fs.glob"},
+	}
+}
+
+// =============================================================================
+// Flags Module (flags.*)
+// =============================================================================
+
+func docFlagsExists() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "flags.exists",
+		Category:    "module-flags",
+		Signature:   "flags.exists(name, version)",
+		Description: "Check if a flag exists in the given Bazel version",
+		Args: []ArgDoc{
+			{Name: "name", Type: "str", Required: true, Description: "Flag name (without leading --)"},
+			{Name: "version", Type: "str", Required: true, Description: "Bazel version to check"},
+		},
+		Behavior: []string{
+			"Returns True if the flag exists in the given version",
+			"Returns False if the flag doesn't exist",
+			"Requires flag database to be loaded",
+		},
+		Example: `if flags.exists("incompatible_enable_cc_toolchain_resolution", "8.0.0"):
+    print("Flag exists in Bazel 8.0.0")`,
+		SeeAlso: []string{"flags.get", "flags.diff"},
+	}
+}
+
+func docFlagsGet() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "flags.get",
+		Category:    "module-flags",
+		Signature:   "flags.get(name, version)",
+		Description: "Get detailed information about a flag",
+		Args: []ArgDoc{
+			{Name: "name", Type: "str", Required: true, Description: "Flag name (without leading --)"},
+			{Name: "version", Type: "str", Required: true, Description: "Bazel version to check"},
+		},
+		Behavior: []string{
+			"Returns struct with flag details or None if not found",
+			"Struct fields: name, short, type, default, description, tags, sources",
+			"Also includes: is_deprecated, is_experimental, is_incompatible",
+		},
+		Example: `flag = flags.get("incompatible_enable_cc_toolchain_resolution", "8.0.0")
+if flag:
+    print("Default:", flag.default)
+    print("Deprecated:", flag.is_deprecated)`,
+		SeeAlso: []string{"flags.exists", "flags.diff"},
+	}
+}
+
+func docFlagsDiff() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "flags.diff",
+		Category:    "module-flags",
+		Signature:   "flags.diff(v1, v2)",
+		Description: "Compute differences in flags between two Bazel versions",
+		Args: []ArgDoc{
+			{Name: "v1", Type: "str", Required: true, Description: "Source version"},
+			{Name: "v2", Type: "str", Required: true, Description: "Target version"},
+		},
+		Behavior: []string{
+			"Returns struct with added, removed, and changed flags",
+			"Each change includes change_type: default_changed, deprecated, type_changed",
+			"Useful for migration planning between Bazel versions",
+		},
+		Example: `diff = flags.diff("7.0.0", "8.0.0")
+print("Added flags:", len(diff.added))
+print("Removed flags:", len(diff.removed))
+for change in diff.changed:
+    if change.change_type == "deprecated":
+        print("Newly deprecated:", change.name)`,
+		SeeAlso: []string{"flags.get", "flags.incompatible"},
+	}
+}
+
+func docFlagsIncompatible() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "flags.incompatible",
+		Category:    "module-flags",
+		Signature:   "flags.incompatible(version)",
+		Description: "Get all --incompatible_* flags for a Bazel version",
+		Args: []ArgDoc{
+			{Name: "version", Type: "str", Required: true, Description: "Bazel version"},
+		},
+		Behavior: []string{
+			"Returns list of all flags starting with 'incompatible_'",
+			"Each flag is a struct with full flag details",
+			"Useful for discovering migration-related flags",
+		},
+		Example: `incompatible = flags.incompatible("8.0.0")
+for flag in incompatible:
+    print(flag.name, "default:", flag.default)`,
+		SeeAlso: []string{"flags.deprecated", "flags.diff"},
+	}
+}
+
+func docFlagsDeprecated() BuiltinDoc {
+	return BuiltinDoc{
+		Name:        "flags.deprecated",
+		Category:    "module-flags",
+		Signature:   "flags.deprecated(version)",
+		Description: "Get all deprecated flags for a Bazel version",
+		Args: []ArgDoc{
+			{Name: "version", Type: "str", Required: true, Description: "Bazel version"},
+		},
+		Behavior: []string{
+			"Returns list of all flags with 'deprecated' tag",
+			"Each flag is a struct with full flag details",
+			"Useful for finding flags that should be removed from .bazelrc",
+		},
+		Example: `deprecated = flags.deprecated("8.0.0")
+for flag in deprecated:
+    print("Consider removing:", flag.name)`,
+		SeeAlso: []string{"flags.incompatible", "flags.diff"},
 	}
 }
