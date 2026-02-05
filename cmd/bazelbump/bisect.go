@@ -21,13 +21,15 @@ func runBisect(args []string) error {
 	var (
 		fromVersion    = fs.String("from", "", "Known-good Bazel version (required)")
 		toVersion      = fs.String("to", "", "Known-bad or target Bazel version (required)")
+		granularityStr = fs.String("granularity", "auto", "Bisect precision: auto, release, rc, commit")
 		testCmd        = fs.String("test", "bazel build //...", "Test command to run at each version")
 		projectPath    = fs.String("path", ".", "Project directory")
 		timeout        = fs.Duration("timeout", 5*time.Minute, "Timeout for each test")
-		skipPrerelease = fs.Bool("skip-prerelease", true, "Skip prerelease versions")
+		skipPrerelease = fs.Bool("skip-prerelease", true, "Skip prerelease versions (release granularity only)")
 		maxSteps       = fs.Int("max-steps", 50, "Maximum bisect iterations")
 		verbose        = fs.Bool("v", false, "Verbose output")
 		jsonOutput     = fs.Bool("json", false, "Output results as JSON")
+		explain        = fs.Bool("explain", false, "Show what engine will be used without running")
 	)
 
 	fs.Usage = func() {
@@ -36,23 +38,37 @@ func runBisect(args []string) error {
 		fmt.Fprintln(os.Stderr, "Usage:")
 		fmt.Fprintln(os.Stderr, "  bazelbump bisect --from <version> --to <version> [flags]")
 		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Granularity Levels:")
+		fmt.Fprintln(os.Stderr, "  release  Bisect between release versions (7.0.0, 7.1.0)")
+		fmt.Fprintln(os.Stderr, "           Engine: native (uses embedded flag database, works offline)")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  rc       Bisect between release candidates (7.0.0-rc1, 7.0.0-rc2)")
+		fmt.Fprintln(os.Stderr, "           Engine: native (fetches RC list from GitHub releases API)")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  commit   Bisect between git commits (for maximum precision)")
+		fmt.Fprintln(os.Stderr, "           Engine: bazelisk (delegated - uses bazelisk --bisect)")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  auto     Auto-detect from version format (default)")
+		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Flags:")
 		fs.PrintDefaults()
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Examples:")
-		fmt.Fprintln(os.Stderr, "  # Find which version between 7.0.0 and 8.0.0 breaks the build")
+		fmt.Fprintln(os.Stderr, "  # Release-level bisect (fast, works offline)")
 		fmt.Fprintln(os.Stderr, "  bazelbump bisect --from 7.0.0 --to 8.0.0")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "  # Use a custom test command")
-		fmt.Fprintln(os.Stderr, "  bazelbump bisect --from 7.0.0 --to 8.0.0 --test \"bazel test //...\"")
+		fmt.Fprintln(os.Stderr, "  # RC-level bisect (find which RC introduced breakage)")
+		fmt.Fprintln(os.Stderr, "  bazelbump bisect --from 7.0.0-rc1 --to 7.0.0 --granularity=rc")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "  # Include prerelease versions")
-		fmt.Fprintln(os.Stderr, "  bazelbump bisect --from 7.0.0 --to 8.0.0 --skip-prerelease=false")
+		fmt.Fprintln(os.Stderr, "  # Commit-level bisect (maximum precision, uses bazelisk)")
+		fmt.Fprintln(os.Stderr, "  bazelbump bisect --from 7.0.0 --to 7.1.0 --granularity=commit")
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "Notes:")
-		fmt.Fprintln(os.Stderr, "  - Requires bazelisk to be installed for version switching")
-		fmt.Fprintln(os.Stderr, "  - The --from version must pass the test command")
-		fmt.Fprintln(os.Stderr, "  - Uses binary search to minimize the number of test runs")
+		fmt.Fprintln(os.Stderr, "  # See what engine will be used without running")
+		fmt.Fprintln(os.Stderr, "  bazelbump bisect --from 7.0.0 --to 8.0.0 --explain")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Prerequisites:")
+		fmt.Fprintln(os.Stderr, "  - bazelisk must be installed for version switching")
+		fmt.Fprintln(os.Stderr, "  - For commit-level: GITHUB_TOKEN recommended to avoid rate limiting")
 	}
 
 	if err := fs.Parse(args); err != nil {
@@ -67,18 +83,55 @@ func runBisect(args []string) error {
 		return fmt.Errorf("--to is required")
 	}
 
-	// Load flag database
+	// Parse granularity
+	granularity, err := bisect.ParseGranularity(*granularityStr)
+	if err != nil {
+		return err
+	}
+
+	// Auto-detect granularity if needed
+	if granularity == bisect.GranularityAuto {
+		granularity = bisect.DetectGranularity(*fromVersion, *toVersion)
+	}
+
+	// Load flag database (needed for release engine and version validation)
 	db, err := loadFlagDB()
 	if err != nil {
 		return fmt.Errorf("load flag database: %w", err)
 	}
 
-	// Validate versions exist in database
-	if !db.HasVersion(*fromVersion) {
-		return fmt.Errorf("unknown version: %s (use 'bazelbump flags --list-versions' to see available versions)", *fromVersion)
+	// For release granularity, validate versions exist in database
+	if granularity == bisect.GranularityRelease {
+		if !db.HasVersion(*fromVersion) {
+			return fmt.Errorf("unknown version: %s (use 'bazelbump flags --list-versions' to see available versions)", *fromVersion)
+		}
+		if !db.HasVersion(*toVersion) {
+			return fmt.Errorf("unknown version: %s (use 'bazelbump flags --list-versions' to see available versions)", *toVersion)
+		}
 	}
-	if !db.HasVersion(*toVersion) {
-		return fmt.Errorf("unknown version: %s (use 'bazelbump flags --list-versions' to see available versions)", *toVersion)
+
+	// Select engine to show info
+	engine, err := bisect.SelectEngine(granularity, db)
+	if err != nil {
+		return fmt.Errorf("select engine: %w", err)
+	}
+
+	// Handle --explain flag
+	if *explain {
+		fmt.Printf("Bisect Configuration:\n")
+		fmt.Printf("  From: %s\n", *fromVersion)
+		fmt.Printf("  To: %s\n", *toVersion)
+		fmt.Printf("  Granularity: %s\n", granularity)
+		fmt.Println()
+		fmt.Printf("Engine: %s\n", engine.Name())
+		fmt.Printf("  %s\n", engine.Description())
+		fmt.Printf("  Native: %t\n", engine.IsNative())
+		fmt.Printf("  Requires network: %t\n", engine.RequiresNetwork())
+		if !engine.IsNative() {
+			fmt.Println()
+			fmt.Println("Note: This granularity delegates to bazelisk for execution.")
+		}
+		return nil
 	}
 
 	// Check bazelisk is available
@@ -86,10 +139,11 @@ func runBisect(args []string) error {
 		return err
 	}
 
-	// Create bisector
+	// Create bisector config
 	cfg := bisect.Config{
 		FromVersion:    *fromVersion,
 		ToVersion:      *toVersion,
+		Granularity:    granularity,
 		TestCommand:    *testCmd,
 		ProjectPath:    *projectPath,
 		Timeout:        *timeout,
@@ -100,9 +154,9 @@ func runBisect(args []string) error {
 
 	if !*jsonOutput {
 		cfg.OnProgress = func(p bisect.Progress) {
-			status := "PASS"
+			status := color(colorGreen, "PASS")
 			if !p.Passed {
-				status = "FAIL"
+				status = color(colorRed, "FAIL")
 			}
 			fmt.Printf("Testing %s... %s (%s)\n", p.CurrentVersion, status, p.Duration.Round(time.Millisecond))
 			if *verbose && !p.Passed {
@@ -127,7 +181,9 @@ func runBisect(args []string) error {
 
 	// Run bisect
 	if !*jsonOutput {
-		fmt.Printf("Bisecting between %s and %s...\n", *fromVersion, *toVersion)
+		fmt.Printf("Bisecting between %s and %s\n", *fromVersion, *toVersion)
+		fmt.Printf("Engine: %s\n", engine.Name())
+		fmt.Printf("Granularity: %s\n", granularity)
 		fmt.Printf("Test command: %s\n", *testCmd)
 		fmt.Println()
 	}
@@ -146,11 +202,9 @@ func runBisect(args []string) error {
 	fmt.Print(bisect.FormatResult(result))
 
 	// Suggest next steps
-	if result.FirstBadVersion != "" {
+	if result.FirstBadVersion != "" || (result.CommitResult != nil && result.CommitResult.FirstBadCommit != "") {
 		fmt.Println()
-		fmt.Println("Suggested next steps:")
-		fmt.Printf("  1. bazelbump analyze --from %s --to %s\n", result.LastGoodVersion, result.FirstBadVersion)
-		fmt.Printf("  2. bazelbump diff --from %s --to %s\n", result.LastGoodVersion, result.FirstBadVersion)
+		fmt.Print(bisect.FormatSuggestedNextSteps(result))
 	}
 
 	return nil
@@ -158,7 +212,6 @@ func runBisect(args []string) error {
 
 func checkBazelisk() error {
 	// Check if bazelisk or bazel is available
-	// bazelisk responds to USE_BAZEL_VERSION env var
 	path, err := findExecutable("bazelisk")
 	if err != nil {
 		path, err = findExecutable("bazel")
@@ -166,16 +219,11 @@ func checkBazelisk() error {
 			return fmt.Errorf("bazelisk not found: install from https://github.com/bazelbuild/bazelisk")
 		}
 	}
-
-	if verbose {
-		fmt.Printf("Using: %s\n", path)
-	}
-
+	_ = path // Used for verbose output if needed
 	return nil
 }
 
 func findExecutable(name string) (string, error) {
-	// Simple PATH lookup
 	pathEnv := os.Getenv("PATH")
 	paths := splitPath(pathEnv)
 
@@ -193,10 +241,6 @@ func splitPath(path string) []string {
 	if path == "" {
 		return nil
 	}
-	return splitPathSeparator(path)
-}
-
-func splitPathSeparator(path string) []string {
 	// Unix uses :
 	sep := ":"
 	var result []string
@@ -216,11 +260,20 @@ func splitPathSeparator(path string) []string {
 }
 
 func outputBisectJSON(result *bisect.Result) error {
-	// Simple JSON output
 	fmt.Println("{")
+	fmt.Printf("  \"engine\": %q,\n", result.EngineName)
+	fmt.Printf("  \"granularity\": %q,\n", result.Granularity.String())
+	fmt.Printf("  \"is_native\": %t,\n", result.IsNative)
 	fmt.Printf("  \"first_bad_version\": %q,\n", result.FirstBadVersion)
 	fmt.Printf("  \"last_good_version\": %q,\n", result.LastGoodVersion)
 	fmt.Printf("  \"steps_taken\": %d,\n", result.StepsTaken)
+
+	if result.CommitResult != nil {
+		fmt.Printf("  \"commit_result\": {\n")
+		fmt.Printf("    \"first_bad_commit\": %q,\n", result.CommitResult.FirstBadCommit)
+		fmt.Printf("    \"commit_url\": %q\n", result.CommitResult.CommitURL)
+		fmt.Printf("  },\n")
+	}
 
 	fmt.Println("  \"tested_versions\": [")
 	for i, tv := range result.TestedVersions {
@@ -242,15 +295,4 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
-}
-
-var verbose bool
-
-func printBisectUsage() {
-	fmt.Println(`Find the first Bazel version that breaks your build.
-
-Usage:
-  bazelbump bisect --from <version> --to <version> [flags]
-
-Use "bazelbump bisect --help" for more information.`)
 }

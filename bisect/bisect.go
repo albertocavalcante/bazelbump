@@ -8,13 +8,10 @@ package bisect
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/albertocavalcante/bazelbump/flagdb"
-	"github.com/albertocavalcante/bazelbump/internal/version"
 )
 
 // Config configures a bisect operation.
@@ -24,6 +21,10 @@ type Config struct {
 
 	// ToVersion is the known-bad or target version (required).
 	ToVersion string
+
+	// Granularity specifies the precision level.
+	// Default: auto-detect from version format
+	Granularity Granularity
 
 	// TestCommand is the command to run at each version.
 	// Default: "bazel build //..."
@@ -38,6 +39,7 @@ type Config struct {
 	Timeout time.Duration
 
 	// SkipPrerelease skips prerelease versions during bisect.
+	// Only applies to release granularity.
 	SkipPrerelease bool
 
 	// MaxSteps limits the number of bisect iterations.
@@ -63,6 +65,12 @@ type Progress struct {
 
 // Result contains the bisect results.
 type Result struct {
+	// Engine info for transparency
+	EngineName        string
+	EngineDescription string
+	IsNative          bool
+	Granularity       Granularity
+
 	// FirstBadVersion is the first version where the test failed.
 	FirstBadVersion string
 
@@ -80,6 +88,9 @@ type Result struct {
 
 	// Error is set if bisect failed to complete.
 	Error error
+
+	// For commit-level bisect (delegated)
+	CommitResult *CommitBisectResult
 }
 
 // TestedVersion records a single version test.
@@ -120,10 +131,59 @@ func New(db *flagdb.DB, cfg Config) *Bisector {
 
 // Run executes the bisect operation.
 func (b *Bisector) Run(ctx context.Context) (*Result, error) {
-	result := &Result{}
+	// Determine granularity
+	granularity := b.config.Granularity
+	if granularity == GranularityAuto {
+		granularity = DetectGranularity(b.config.FromVersion, b.config.ToVersion)
+	}
 
+	// Select engine based on granularity
+	engine, err := SelectEngine(granularity, b.db)
+	if err != nil {
+		return nil, fmt.Errorf("select engine: %w", err)
+	}
+
+	result := &Result{
+		EngineName:        engine.Name(),
+		EngineDescription: engine.Description(),
+		IsNative:          engine.IsNative(),
+		Granularity:       granularity,
+	}
+
+	// For commit-level, delegate entirely to bazelisk
+	if granularity == GranularityCommit {
+		return b.runCommitBisect(ctx, result)
+	}
+
+	// For release/RC level, run native bisect
+	return b.runNativeBisect(ctx, engine, result)
+}
+
+// runCommitBisect delegates to bazelisk for commit-level precision.
+func (b *Bisector) runCommitBisect(ctx context.Context, result *Result) (*Result, error) {
+	commitResult, err := RunBazeliskBisect(
+		ctx,
+		b.config.FromVersion,
+		b.config.ToVersion,
+		b.config.TestCommand,
+		b.config.ProjectPath,
+		nil, // onProgress
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	result.CommitResult = commitResult
+	result.FirstBadVersion = commitResult.FirstBadCommit
+	result.StepsTaken = commitResult.StepsTaken
+
+	return result, nil
+}
+
+// runNativeBisect performs binary search using the selected engine.
+func (b *Bisector) runNativeBisect(ctx context.Context, engine Engine, result *Result) (*Result, error) {
 	// Get versions in range
-	versions, err := b.getVersionsInRange()
+	versions, err := engine.GetVersions(ctx, b.config.FromVersion, b.config.ToVersion)
 	if err != nil {
 		return nil, fmt.Errorf("get versions: %w", err)
 	}
@@ -133,8 +193,16 @@ func (b *Bisector) Run(ctx context.Context) (*Result, error) {
 	}
 
 	// Verify from version passes
-	fromResult := b.testVersion(ctx, b.config.FromVersion)
-	result.TestedVersions = append(result.TestedVersions, fromResult)
+	fromResult, err := engine.TestVersion(ctx, b.config.FromVersion, b.config.TestCommand, b.config.ProjectPath, b.config.Timeout)
+	if err != nil {
+		return nil, fmt.Errorf("test from version: %w", err)
+	}
+	result.TestedVersions = append(result.TestedVersions, TestedVersion{
+		Version:  fromResult.Version,
+		Passed:   fromResult.Passed,
+		Output:   fromResult.Output,
+		Duration: fromResult.Duration,
+	})
 	result.StepsTaken++
 
 	if !fromResult.Passed {
@@ -142,8 +210,16 @@ func (b *Bisector) Run(ctx context.Context) (*Result, error) {
 	}
 
 	// Verify to version fails (or find if it passes)
-	toResult := b.testVersion(ctx, b.config.ToVersion)
-	result.TestedVersions = append(result.TestedVersions, toResult)
+	toResult, err := engine.TestVersion(ctx, b.config.ToVersion, b.config.TestCommand, b.config.ProjectPath, b.config.Timeout)
+	if err != nil {
+		return nil, fmt.Errorf("test to version: %w", err)
+	}
+	result.TestedVersions = append(result.TestedVersions, TestedVersion{
+		Version:  toResult.Version,
+		Passed:   toResult.Passed,
+		Output:   toResult.Output,
+		Duration: toResult.Duration,
+	})
 	result.StepsTaken++
 
 	if toResult.Passed {
@@ -167,8 +243,16 @@ func (b *Bisector) Run(ctx context.Context) (*Result, error) {
 		mid := (good + bad) / 2
 		testVer := versions[mid]
 
-		testResult := b.testVersion(ctx, testVer)
-		result.TestedVersions = append(result.TestedVersions, testResult)
+		testResult, err := engine.TestVersion(ctx, testVer, b.config.TestCommand, b.config.ProjectPath, b.config.Timeout)
+		if err != nil {
+			return nil, fmt.Errorf("test version %s: %w", testVer, err)
+		}
+		result.TestedVersions = append(result.TestedVersions, TestedVersion{
+			Version:  testResult.Version,
+			Passed:   testResult.Passed,
+			Output:   testResult.Output,
+			Duration: testResult.Duration,
+		})
 		result.StepsTaken++
 
 		if b.config.OnProgress != nil {
@@ -192,8 +276,8 @@ func (b *Bisector) Run(ctx context.Context) (*Result, error) {
 	result.FirstBadVersion = versions[bad]
 	result.LastGoodVersion = versions[good]
 
-	// Get flag changes between good and bad versions
-	if b.db != nil {
+	// Get flag changes between good and bad versions (only for release engine)
+	if b.db != nil && result.IsNative {
 		diff, err := b.db.Diff(result.LastGoodVersion, result.FirstBadVersion)
 		if err == nil {
 			result.FlagChanges = diff
@@ -201,63 +285,6 @@ func (b *Bisector) Run(ctx context.Context) (*Result, error) {
 	}
 
 	return result, nil
-}
-
-// getVersionsInRange returns all versions between from and to (inclusive).
-func (b *Bisector) getVersionsInRange() ([]string, error) {
-	allVersions := b.db.Versions()
-
-	fromVer, err := version.Parse(b.config.FromVersion)
-	if err != nil {
-		return nil, fmt.Errorf("parse from version: %w", err)
-	}
-
-	toVer, err := version.Parse(b.config.ToVersion)
-	if err != nil {
-		return nil, fmt.Errorf("parse to version: %w", err)
-	}
-
-	var result []string
-	for _, v := range allVersions {
-		if v.Compare(fromVer) < 0 || v.Compare(toVer) > 0 {
-			continue
-		}
-
-		if b.config.SkipPrerelease && v.IsPrerelease() {
-			continue
-		}
-
-		result = append(result, v.String())
-	}
-
-	return result, nil
-}
-
-// testVersion tests a specific Bazel version.
-func (b *Bisector) testVersion(ctx context.Context, ver string) TestedVersion {
-	start := time.Now()
-
-	ctx, cancel := context.WithTimeout(ctx, b.config.Timeout)
-	defer cancel()
-
-	// Create command
-	cmd := exec.CommandContext(ctx, "bash", "-c", b.config.TestCommand)
-	cmd.Dir = b.config.ProjectPath
-
-	// Set USE_BAZEL_VERSION for bazelisk
-	cmd.Env = append(os.Environ(), "USE_BAZEL_VERSION="+ver)
-
-	output, err := cmd.CombinedOutput()
-	duration := time.Since(start)
-
-	passed := err == nil
-
-	return TestedVersion{
-		Version:  ver,
-		Passed:   passed,
-		Output:   string(output),
-		Duration: duration,
-	}
 }
 
 // estimateSteps estimates total steps for binary search.
@@ -277,13 +304,33 @@ func estimateSteps(n int) int {
 func FormatResult(r *Result) string {
 	var sb strings.Builder
 
+	// Always show engine info for transparency
+	if r.EngineName != "" {
+		fmt.Fprintf(&sb, "Engine: %s\n", r.EngineName)
+		fmt.Fprintf(&sb, "Granularity: %s\n", r.Granularity)
+		if !r.IsNative {
+			sb.WriteString("Note: This bisect delegates to bazelisk\n")
+		}
+		sb.WriteString("\n")
+	}
+
 	if r.Error != nil {
 		fmt.Fprintf(&sb, "Bisect failed: %v\n", r.Error)
 		return sb.String()
 	}
 
-	if r.FirstBadVersion == "" {
+	if r.FirstBadVersion == "" && r.LastGoodVersion != "" {
 		fmt.Fprintf(&sb, "No breakage found! Version %s passes.\n", r.LastGoodVersion)
+		return sb.String()
+	}
+
+	// Handle commit-level results differently
+	if r.CommitResult != nil {
+		fmt.Fprintf(&sb, "First bad commit: %s\n", r.CommitResult.FirstBadCommit)
+		if r.CommitResult.CommitURL != "" {
+			fmt.Fprintf(&sb, "View: %s\n", r.CommitResult.CommitURL)
+		}
+		fmt.Fprintf(&sb, "Steps taken: %d\n", r.CommitResult.StepsTaken)
 		return sb.String()
 	}
 
@@ -324,6 +371,37 @@ func FormatResult(r *Result) string {
 				fmt.Fprintf(&sb, "    ! --%s: %s -> %s\n", c.Name, c.From.Default, c.To.Default)
 			}
 		}
+	}
+
+	return sb.String()
+}
+
+// FormatSuggestedNextSteps formats suggested next steps based on results.
+func FormatSuggestedNextSteps(r *Result) string {
+	var sb strings.Builder
+
+	sb.WriteString("Suggested next steps:\n")
+
+	// If we did release-level, suggest RC or commit level
+	if r.Granularity == GranularityRelease && r.FirstBadVersion != "" && r.LastGoodVersion != "" {
+		fmt.Fprintf(&sb, "  # For more precision, bisect at RC level:\n")
+		fmt.Fprintf(&sb, "  bazelbump bisect --from %s --to %s --granularity=rc\n\n", r.LastGoodVersion, r.FirstBadVersion)
+
+		fmt.Fprintf(&sb, "  # Or at commit level (requires bazelisk):\n")
+		fmt.Fprintf(&sb, "  bazelbump bisect --from %s --to %s --granularity=commit\n\n", r.LastGoodVersion, r.FirstBadVersion)
+	}
+
+	// If we did RC-level, suggest commit level
+	if r.Granularity == GranularityRC && r.FirstBadVersion != "" && r.LastGoodVersion != "" {
+		fmt.Fprintf(&sb, "  # For commit-level precision:\n")
+		fmt.Fprintf(&sb, "  bazelbump bisect --from %s --to %s --granularity=commit\n\n", r.LastGoodVersion, r.FirstBadVersion)
+	}
+
+	// Always suggest analyze and diff
+	if r.FirstBadVersion != "" && r.LastGoodVersion != "" {
+		fmt.Fprintf(&sb, "  # Analyze flag changes:\n")
+		fmt.Fprintf(&sb, "  bazelbump analyze --from %s --to %s\n", r.LastGoodVersion, r.FirstBadVersion)
+		fmt.Fprintf(&sb, "  bazelbump diff --from %s --to %s\n", r.LastGoodVersion, r.FirstBadVersion)
 	}
 
 	return sb.String()
