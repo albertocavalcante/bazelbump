@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/albertocavalcante/bazelbump/bisect"
+	"github.com/albertocavalcante/bazelbump/internal/netconfig"
 )
 
 func runBisect(args []string) error {
@@ -30,6 +31,10 @@ func runBisect(args []string) error {
 		verbose        = fs.Bool("v", false, "Verbose output")
 		jsonOutput     = fs.Bool("json", false, "Output results as JSON")
 		explain        = fs.Bool("explain", false, "Show what engine will be used without running")
+		listVersions   = fs.Bool("list-versions", false, "List available versions for the granularity")
+		// Network mode flags (air-gap aware)
+		online  = fs.Bool("online", false, "Enable network access for GitHub API fallback")
+		offline = fs.Bool("offline", false, "Force offline mode (no network access)")
 	)
 
 	fs.Usage = func() {
@@ -50,12 +55,24 @@ func runBisect(args []string) error {
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  auto     Auto-detect from version format (default)")
 		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Network Mode (air-gap support):")
+		fmt.Fprintln(os.Stderr, "  Default: offline (uses only local flag database)")
+		fmt.Fprintln(os.Stderr, "  --online    Enable GitHub API fallback for version validation")
+		fmt.Fprintln(os.Stderr, "  --offline   Force offline mode (overrides BAZELBUMP_ONLINE)")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  Environment variables:")
+		fmt.Fprintln(os.Stderr, "    BAZELBUMP_ONLINE=1   Enable network access")
+		fmt.Fprintln(os.Stderr, "    BAZELBUMP_OFFLINE=1  Force offline (takes precedence)")
+		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Flags:")
 		fs.PrintDefaults()
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Examples:")
 		fmt.Fprintln(os.Stderr, "  # Release-level bisect (fast, works offline)")
 		fmt.Fprintln(os.Stderr, "  bazelbump bisect --from 7.0.0 --to 8.0.0")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  # Validate a new version via GitHub (online mode)")
+		fmt.Fprintln(os.Stderr, "  bazelbump bisect --from 9.0.0 --to 9.1.0 --online")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "  # RC-level bisect (find which RC introduced breakage)")
 		fmt.Fprintln(os.Stderr, "  bazelbump bisect --from 7.0.0-rc1 --to 7.0.0 --granularity=rc")
@@ -66,6 +83,9 @@ func runBisect(args []string) error {
 		fmt.Fprintln(os.Stderr, "  # See what engine will be used without running")
 		fmt.Fprintln(os.Stderr, "  bazelbump bisect --from 7.0.0 --to 8.0.0 --explain")
 		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "  # List available versions")
+		fmt.Fprintln(os.Stderr, "  bazelbump bisect --list-versions")
+		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Prerequisites:")
 		fmt.Fprintln(os.Stderr, "  - bazelisk must be installed for version switching")
 		fmt.Fprintln(os.Stderr, "  - For commit-level: GITHUB_TOKEN recommended to avoid rate limiting")
@@ -75,12 +95,19 @@ func runBisect(args []string) error {
 		return err
 	}
 
-	// Validate required flags
-	if *fromVersion == "" {
-		return fmt.Errorf("--from is required")
+	// Validate required flags (not required for --list-versions)
+	if !*listVersions {
+		if *fromVersion == "" {
+			return fmt.Errorf("--from is required")
+		}
+		if *toVersion == "" {
+			return fmt.Errorf("--to is required")
+		}
 	}
-	if *toVersion == "" {
-		return fmt.Errorf("--to is required")
+
+	// Validate mutually exclusive flags
+	if *online && *offline {
+		return fmt.Errorf("--online and --offline are mutually exclusive")
 	}
 
 	// Parse granularity
@@ -89,9 +116,13 @@ func runBisect(args []string) error {
 		return err
 	}
 
-	// Auto-detect granularity if needed
+	// Auto-detect granularity if needed (for list-versions, default to release)
 	if granularity == bisect.GranularityAuto {
-		granularity = bisect.DetectGranularity(*fromVersion, *toVersion)
+		if *listVersions {
+			granularity = bisect.GranularityRelease
+		} else {
+			granularity = bisect.DetectGranularity(*fromVersion, *toVersion)
+		}
 	}
 
 	// Load flag database (needed for release engine and version validation)
@@ -100,14 +131,35 @@ func runBisect(args []string) error {
 		return fmt.Errorf("load flag database: %w", err)
 	}
 
-	// For release granularity, validate versions exist in database
-	if granularity == bisect.GranularityRelease {
-		if !db.HasVersion(*fromVersion) {
-			return fmt.Errorf("unknown version: %s (use 'bazelbump flags --list-versions' to see available versions)", *fromVersion)
+	// Handle --list-versions flag
+	if *listVersions {
+		versions, err := bisect.ListAvailableVersions(context.Background(), granularity, db)
+		if err != nil {
+			return err
 		}
-		if !db.HasVersion(*toVersion) {
-			return fmt.Errorf("unknown version: %s (use 'bazelbump flags --list-versions' to see available versions)", *toVersion)
-		}
+		fmt.Println(bisect.FormatAvailableVersions(versions))
+		return nil
+	}
+
+	// Build network config (air-gap aware)
+	netCfg := netconfig.Default()
+	if *online {
+		netCfg = netCfg.WithOnline()
+	}
+	if *offline {
+		netCfg = netCfg.WithOffline()
+	}
+
+	// Validate versions exist and are in correct order
+	validator := bisect.NewValidator(db, netCfg)
+	warnings, err := validator.ValidateVersions(context.Background(), *fromVersion, *toVersion, granularity)
+	if err != nil {
+		return err
+	}
+
+	// Show warnings (e.g., "version exists but no flag data")
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 	}
 
 	// Select engine to show info
@@ -122,6 +174,7 @@ func runBisect(args []string) error {
 		fmt.Printf("  From: %s\n", *fromVersion)
 		fmt.Printf("  To: %s\n", *toVersion)
 		fmt.Printf("  Granularity: %s\n", granularity)
+		fmt.Printf("  Network mode: %s\n", netCfg.Mode)
 		fmt.Println()
 		fmt.Printf("Engine: %s\n", engine.Name())
 		fmt.Printf("  %s\n", engine.Description())
@@ -184,6 +237,7 @@ func runBisect(args []string) error {
 		fmt.Printf("Bisecting between %s and %s\n", *fromVersion, *toVersion)
 		fmt.Printf("Engine: %s\n", engine.Name())
 		fmt.Printf("Granularity: %s\n", granularity)
+		fmt.Printf("Network mode: %s\n", netCfg.Mode)
 		fmt.Printf("Test command: %s\n", *testCmd)
 		fmt.Println()
 	}
