@@ -65,11 +65,16 @@ func Parse(s string) (Version, error) {
 }
 
 // MustParse parses a version string, panicking on error.
-// Use only for compile-time constants.
+//
+// This function should ONLY be used for:
+//   - Compile-time constants (e.g., var minVersion = version.MustParse("7.0.0"))
+//   - Test fixtures where invalid input is a programming error
+//
+// For runtime parsing of user input, always use Parse() instead.
 func MustParse(s string) Version {
 	v, err := Parse(s)
 	if err != nil {
-		panic(err)
+		panic(fmt.Sprintf("version.MustParse(%q): %v", s, err))
 	}
 	return v
 }

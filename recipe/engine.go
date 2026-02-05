@@ -5,14 +5,22 @@ package recipe
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/albertocavalcante/bazelbump/ast"
+)
+
+const (
+	// defaultVerifyTimeout is the default timeout for verification commands.
+	defaultVerifyTimeout = 5 * time.Minute
 )
 
 // Engine executes recipes.
@@ -488,12 +496,32 @@ func (e *Engine) ensureLoadStatements(ctx *Context, file string, rules []Detecte
 }
 
 // runVerifyStep runs a verification command.
-func (e *Engine) runVerifyStep(ctx *Context, verify *VerifyStep) error {
-	if ctx.DryRun {
+func (e *Engine) runVerifyStep(rctx *Context, verify *VerifyStep) error {
+	if rctx.DryRun {
 		return nil // Skip verification in dry-run
 	}
 
-	// TODO: Actually run the command
-	// For now, skip verification
+	if verify.Command == "" {
+		return nil // No command to run
+	}
+
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), defaultVerifyTimeout)
+	defer cancel()
+
+	// Run the command via shell
+	cmd := exec.CommandContext(ctx, "sh", "-c", verify.Command)
+	cmd.Dir = rctx.ProjectPath
+	cmd.Env = os.Environ()
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if verify.AllowFailure {
+			// Log but don't fail
+			return nil
+		}
+		return fmt.Errorf("verification failed: %w\nOutput: %s", err, string(output))
+	}
+
 	return nil
 }

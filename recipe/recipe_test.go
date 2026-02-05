@@ -508,6 +508,196 @@ super_cc_library_extra(
 	}
 }
 
+func TestEngine_RunVerifyStep(t *testing.T) {
+	// Test verification step execution
+	tmpDir := t.TempDir()
+
+	// Create a simple script that succeeds
+	scriptPath := filepath.Join(tmpDir, "check.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine()
+
+	// Register a test recipe with a verify step
+	testRecipe := &Recipe{
+		Name:    "test-verify",
+		Version: "1.0.0",
+		Steps: []Step{
+			{
+				ID:   "verify",
+				Name: "Verify Build",
+				Verify: &VerifyStep{
+					Command: filepath.Join(tmpDir, "check.sh"),
+				},
+			},
+		},
+	}
+	if err := engine.Register(testRecipe); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run the recipe
+	result, err := engine.Run("test-verify", Options{
+		ProjectPath: tmpDir,
+		DryRun:      false,
+	})
+
+	if err != nil {
+		t.Fatalf("recipe failed: %v", err)
+	}
+
+	if !result.Success {
+		t.Errorf("expected success, got failure: %v", result.Error)
+	}
+}
+
+func TestEngine_VerifyStep_Failure(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a script that fails
+	scriptPath := filepath.Join(tmpDir, "fail.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 1"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine()
+
+	// Register a test recipe with a failing verify step
+	testRecipe := &Recipe{
+		Name:    "test-verify-fail",
+		Version: "1.0.0",
+		Steps: []Step{
+			{
+				ID:   "verify",
+				Name: "Verify Build",
+				Verify: &VerifyStep{
+					Command: filepath.Join(tmpDir, "fail.sh"),
+				},
+			},
+		},
+	}
+	if err := engine.Register(testRecipe); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run the recipe
+	result, err := engine.Run("test-verify-fail", Options{
+		ProjectPath: tmpDir,
+		DryRun:      false,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Recipe should complete but report failure
+	if result.Success {
+		t.Error("expected failure, got success")
+	}
+
+	if result.Error == nil {
+		t.Error("expected error in result")
+	}
+}
+
+func TestEngine_VerifyStep_AllowFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a script that fails
+	scriptPath := filepath.Join(tmpDir, "fail.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 1"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine()
+
+	// Register a test recipe with a failing verify step that allows failure
+	testRecipe := &Recipe{
+		Name:    "test-verify-allow-fail",
+		Version: "1.0.0",
+		Steps: []Step{
+			{
+				ID:   "verify",
+				Name: "Verify Build",
+				Verify: &VerifyStep{
+					Command:      filepath.Join(tmpDir, "fail.sh"),
+					AllowFailure: true,
+				},
+			},
+		},
+	}
+	if err := engine.Register(testRecipe); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run the recipe
+	result, err := engine.Run("test-verify-allow-fail", Options{
+		ProjectPath: tmpDir,
+		DryRun:      false,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Recipe should succeed since failure is allowed
+	if !result.Success {
+		t.Errorf("expected success (allow_failure=true), got failure: %v", result.Error)
+	}
+}
+
+func TestEngine_VerifyStep_DryRun(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a script that creates a marker file
+	scriptPath := filepath.Join(tmpDir, "create_marker.sh")
+	markerPath := filepath.Join(tmpDir, "marker")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\ntouch "+markerPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	engine := NewEngine()
+
+	// Register a test recipe
+	testRecipe := &Recipe{
+		Name:    "test-verify-dryrun",
+		Version: "1.0.0",
+		Steps: []Step{
+			{
+				ID:   "verify",
+				Name: "Verify Build",
+				Verify: &VerifyStep{
+					Command: filepath.Join(tmpDir, "create_marker.sh"),
+				},
+			},
+		},
+	}
+	if err := engine.Register(testRecipe); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run in dry-run mode
+	result, err := engine.Run("test-verify-dryrun", Options{
+		ProjectPath: tmpDir,
+		DryRun:      true,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !result.Success {
+		t.Errorf("expected success, got failure: %v", result.Error)
+	}
+
+	// Marker file should NOT exist (dry-run should skip verification)
+	if _, err := os.Stat(markerPath); err == nil {
+		t.Error("marker file exists - dry-run should not execute verification command")
+	}
+}
+
 func TestAutoloadMigration_MultiLineLoad(t *testing.T) {
 	// Test that AST-based ensure_load correctly handles multi-line load statements
 	// This was a critical bug that broke 96% of Envoy BUILD files with text-based approach

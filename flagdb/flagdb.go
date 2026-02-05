@@ -25,6 +25,7 @@ package flagdb
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,6 +34,14 @@ import (
 	"strings"
 
 	"github.com/albertocavalcante/bazelbump/internal/version"
+)
+
+// Sentinel errors for flagdb operations.
+var (
+	// ErrFlagNotFound is returned when a flag does not exist in the database.
+	ErrFlagNotFound = errors.New("flag not found")
+	// ErrVersionNotFound is returned when a version does not exist in the database.
+	ErrVersionNotFound = errors.New("version not found")
 )
 
 // Flag represents a Bazel command-line flag.
@@ -138,6 +147,7 @@ func (db *DB) Flags(v string) ([]Flag, error) {
 }
 
 // Flag returns a specific flag for the given version.
+// Returns ErrFlagNotFound if the flag does not exist.
 func (db *DB) Flag(v, name string) (*Flag, error) {
 	// Ensure version is loaded
 	if _, err := db.Flags(v); err != nil {
@@ -149,11 +159,15 @@ func (db *DB) Flag(v, name string) (*Flag, error) {
 			return f, nil
 		}
 	}
-	return nil, nil
+	return nil, fmt.Errorf("%w: %s in version %s", ErrFlagNotFound, name, v)
 }
 
 // loadVersion loads flags for a specific version from disk.
 func (db *DB) loadVersion(v string) ([]Flag, error) {
+	if !db.HasVersion(v) {
+		return nil, fmt.Errorf("%w: %s", ErrVersionNotFound, v)
+	}
+
 	flagsFile := filepath.Join(db.basePath, v, "all.json")
 	f, err := os.Open(flagsFile)
 	if err != nil {

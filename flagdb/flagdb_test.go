@@ -4,6 +4,7 @@
 package flagdb
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -124,6 +125,76 @@ func TestIncompatibleFlags(t *testing.T) {
 	}
 
 	t.Logf("Version 9.0.0 has %d incompatible flags", len(flags))
+}
+
+func TestFlag_NotFound(t *testing.T) {
+	dataDir := findDataDir(t)
+	if dataDir == "" {
+		t.Skip("data/flags directory not found")
+	}
+
+	db, err := Load(dataDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if !db.HasVersion("9.0.0") {
+		t.Skip("version 9.0.0 not available")
+	}
+
+	// Test flag not found error
+	_, err = db.Flag("9.0.0", "nonexistent_flag_that_does_not_exist_12345")
+	if err == nil {
+		t.Fatal("expected error for nonexistent flag")
+	}
+
+	if !errors.Is(err, ErrFlagNotFound) {
+		t.Errorf("expected ErrFlagNotFound, got: %v", err)
+	}
+}
+
+func TestFlags_VersionNotFound(t *testing.T) {
+	dataDir := findDataDir(t)
+	if dataDir == "" {
+		t.Skip("data/flags directory not found")
+	}
+
+	db, err := Load(dataDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	// Test version not found error
+	_, err = db.Flags("999.999.999")
+	if err == nil {
+		t.Fatal("expected error for nonexistent version")
+	}
+
+	if !errors.Is(err, ErrVersionNotFound) {
+		t.Errorf("expected ErrVersionNotFound, got: %v", err)
+	}
+}
+
+func TestFlag_VersionNotFound(t *testing.T) {
+	dataDir := findDataDir(t)
+	if dataDir == "" {
+		t.Skip("data/flags directory not found")
+	}
+
+	db, err := Load(dataDir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	// Test version not found error via Flag()
+	_, err = db.Flag("999.999.999", "keep_going")
+	if err == nil {
+		t.Fatal("expected error for nonexistent version")
+	}
+
+	if !errors.Is(err, ErrVersionNotFound) {
+		t.Errorf("expected ErrVersionNotFound, got: %v", err)
+	}
 }
 
 func findDataDir(t *testing.T) string {

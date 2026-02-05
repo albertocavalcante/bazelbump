@@ -1889,14 +1889,77 @@ func formatCommandForDisplay(cmd string) string {
 
 // executeVerify runs a verification command.
 func (e *Executor) executeVerify(ctx *Context, verify *VerifyStep) error {
-	if ctx.DryRun {
-		return nil // Skip in dry-run
+	if verify.Command == "" {
+		return nil // No command to run
 	}
 
-	// TODO: Implement actual command execution
-	// For now, verification is skipped
-	// This would use os/exec to run the command with timeout
+	if ctx.DryRun {
+		if e.verbose {
+			fmt.Printf("+ [verify] would run: %s\n", truncateCommand(verify.Command, 80))
+		}
+		return nil
+	}
 
+	// Determine timeout
+	timeout := verify.Timeout
+	if timeout == 0 {
+		timeout = 5 * time.Minute // Default timeout
+	}
+
+	// Create context with timeout
+	execCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// Run the command via shell
+	cmd := exec.CommandContext(execCtx, "sh", "-c", verify.Command)
+	cmd.Dir = e.projectPath
+	cmd.Env = os.Environ()
+
+	if e.verbose {
+		fmt.Printf("+ [verify] %s\n", truncateCommand(verify.Command, 80))
+	}
+
+	output, err := cmd.CombinedOutput()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			// Non-exit error (e.g., context timeout)
+			if verify.AllowFailure {
+				if e.verbose {
+					fmt.Printf("+ [verify] failed (allowed): %v\n", err)
+				}
+				return nil
+			}
+			return fmt.Errorf("verification command error: %w", err)
+		}
+	}
+
+	// Check if exit code is acceptable
+	if exitCode != 0 {
+		acceptable := false
+		for _, code := range verify.AcceptableCodes {
+			if exitCode == code {
+				acceptable = true
+				break
+			}
+		}
+
+		if !acceptable {
+			if verify.AllowFailure {
+				if e.verbose {
+					fmt.Printf("+ [verify] exit code %d (allowed)\n", exitCode)
+				}
+				return nil
+			}
+			return fmt.Errorf("verification failed with exit code %d\nOutput:\n%s", exitCode, string(output))
+		}
+	}
+
+	if e.verbose {
+		fmt.Printf("+ [verify] passed\n")
+	}
 	return nil
 }
 
