@@ -115,6 +115,8 @@ func main() {
 		err = runUndo(args)
 	case "snapshot":
 		err = runSnapshot(args)
+	case "bisect":
+		err = runBisect(args)
 	case "version", "-v", "--version":
 		runVersion()
 		return
@@ -142,6 +144,7 @@ func printUsage() {
 %s
   analyze     Analyze a project for Bazel upgrade issues
   apply       Apply transforms to fix detected flag issues
+  bisect      Find the first Bazel version that breaks your build
   diff        Show flag changes between Bazel versions
   flags       List flags for a Bazel version
   recipe      Run migration recipes
@@ -156,6 +159,7 @@ func printUsage() {
   bazelbump analyze --to 9.0.0
   bazelbump analyze --from 8.0.0 --to 9.0.0 --path /path/to/project
   bazelbump apply --to 9.0.0 --dry-run
+  bazelbump bisect --from 7.0.0 --to 8.0.0
   bazelbump diff --from 8.0.0 --to 9.0.0
   bazelbump flags --version 9.0.0 --incompatible
   bazelbump recipe list
