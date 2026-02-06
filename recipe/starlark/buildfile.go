@@ -13,6 +13,25 @@ import (
 	"go.starlark.net/starlark"
 )
 
+// Pre-compiled regex patterns for BUILD file parsing.
+// These are compiled once at package initialization for performance.
+var (
+	// loadPattern matches load statements: load("path", "sym1", "sym2", ...)
+	loadPattern = regexp.MustCompile(`(?m)^load\s*\(\s*"([^"]+)"\s*,([^)]+)\)`)
+
+	// symbolPattern matches quoted strings in load symbol lists
+	symbolPattern = regexp.MustCompile(`"([^"]+)"`)
+
+	// rulePattern matches rule invocations: rule_name(
+	rulePattern = regexp.MustCompile(`(?m)^([a-z_][a-z0-9_]*)\s*\(`)
+
+	// namePattern matches name = "value" attributes
+	namePattern = regexp.MustCompile(`name\s*=\s*"([^"]+)"`)
+
+	// attrPattern matches attr = "value" patterns
+	attrPattern = regexp.MustCompile(`([a-z_][a-z0-9_]*)\s*=\s*"([^"]*)"`)
+)
+
 // BuildFile represents a parsed BUILD file.
 type BuildFile struct {
 	// Path is the path to the BUILD file.
@@ -89,10 +108,6 @@ func ParseBuildFileContent(path, content string) (*BuildFile, error) {
 func parseLoadStatements(content string) []*ParsedLoad {
 	var loads []*ParsedLoad
 
-	// Match load statements
-	// load("path", "sym1", "sym2", ...)
-	loadPattern := regexp.MustCompile(`(?m)^load\s*\(\s*"([^"]+)"\s*,([^)]+)\)`)
-
 	matches := loadPattern.FindAllStringSubmatchIndex(content, -1)
 	for _, match := range matches {
 		if len(match) < 6 {
@@ -122,8 +137,6 @@ func parseLoadStatements(content string) []*ParsedLoad {
 func parseLoadSymbols(symbolsStr string) []string {
 	var symbols []string
 
-	// Match quoted strings (symbols) and handle aliases like: alias = "symbol"
-	symbolPattern := regexp.MustCompile(`"([^"]+)"`)
 	matches := symbolPattern.FindAllStringSubmatch(symbolsStr, -1)
 
 	for _, match := range matches {
@@ -138,10 +151,6 @@ func parseLoadSymbols(symbolsStr string) []string {
 // parseRules extracts rule invocations from BUILD file content.
 func parseRules(content string) []*ParsedRule {
 	var rules []*ParsedRule
-
-	// Match rule invocations like: rule_name(name = "target", ...)
-	// This regex captures the rule kind and the full body
-	rulePattern := regexp.MustCompile(`(?m)^([a-z_][a-z0-9_]*)\s*\(`)
 
 	matches := rulePattern.FindAllStringSubmatchIndex(content, -1)
 	for _, match := range matches {
@@ -225,8 +234,6 @@ func findMatchingParen(content string, start int) int {
 
 // extractNameAttribute extracts the name attribute value from a rule body.
 func extractNameAttribute(body string) string {
-	// Match name = "value" or name="value"
-	namePattern := regexp.MustCompile(`name\s*=\s*"([^"]+)"`)
 	match := namePattern.FindStringSubmatch(body)
 	if len(match) >= 2 {
 		return match[1]
@@ -238,8 +245,6 @@ func extractNameAttribute(body string) string {
 func extractAttributes(body string) map[string]string {
 	attrs := make(map[string]string)
 
-	// Match attr = "value" patterns
-	attrPattern := regexp.MustCompile(`([a-z_][a-z0-9_]*)\s*=\s*"([^"]*)"`)
 	matches := attrPattern.FindAllStringSubmatch(body, -1)
 
 	for _, match := range matches {

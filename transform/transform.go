@@ -37,6 +37,9 @@ import (
 	"github.com/albertocavalcante/bazelbump/analysis"
 )
 
+// Pre-compiled regex patterns for performance.
+var whitespacePattern = regexp.MustCompile(`\s+`)
+
 // Transform defines the interface for flag transformations.
 type Transform interface {
 	// Name returns a short identifier for the transform.
@@ -122,7 +125,7 @@ func (t *RemoveFlagTransform) removeFlagFromLine(line string) string {
 	}
 
 	// Clean up extra whitespace
-	result = regexp.MustCompile(`\s+`).ReplaceAllString(result, " ")
+	result = whitespacePattern.ReplaceAllString(result, " ")
 	result = strings.TrimSpace(result)
 
 	// If line is now just a command (e.g., "build"), it's effectively empty

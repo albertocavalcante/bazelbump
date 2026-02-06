@@ -19,6 +19,13 @@ import (
 	"github.com/albertocavalcante/bazelbump/internal/version"
 )
 
+// Pre-compiled regex patterns for version detection.
+var (
+	commitPattern = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
+	rcPattern     = regexp.MustCompile(`-rc\d+$|rc\d+$`)
+	commitExtract = regexp.MustCompile(`[0-9a-f]{7,40}`)
+)
+
 // Granularity specifies the precision level for bisect.
 type Granularity int
 
@@ -118,14 +125,12 @@ func SelectEngine(granularity Granularity, db *flagdb.DB) (Engine, error) {
 // DetectGranularity determines granularity from version strings.
 func DetectGranularity(from, to string) Granularity {
 	// Check if either looks like a commit (7+ hex chars)
-	commitRe := regexp.MustCompile(`^[0-9a-f]{7,40}$`)
-	if commitRe.MatchString(from) || commitRe.MatchString(to) {
+	if commitPattern.MatchString(from) || commitPattern.MatchString(to) {
 		return GranularityCommit
 	}
 
 	// Check if either is an RC
-	rcRe := regexp.MustCompile(`-rc\d+$|rc\d+$`)
-	if rcRe.MatchString(from) || rcRe.MatchString(to) {
+	if rcPattern.MatchString(from) || rcPattern.MatchString(to) {
 		return GranularityRC
 	}
 
@@ -384,11 +389,10 @@ func parseCommitBisectOutput(output string) *CommitBisectResult {
 	for i, line := range lines {
 		if strings.Contains(line, "first bad commit") || strings.Contains(line, "First bad") {
 			// Try to extract commit from next line or same line
-			commitRe := regexp.MustCompile(`[0-9a-f]{7,40}`)
-			if matches := commitRe.FindString(line); matches != "" {
+			if matches := commitExtract.FindString(line); matches != "" {
 				result.FirstBadCommit = matches
 			} else if i+1 < len(lines) {
-				if matches := commitRe.FindString(lines[i+1]); matches != "" {
+				if matches := commitExtract.FindString(lines[i+1]); matches != "" {
 					result.FirstBadCommit = matches
 				}
 			}

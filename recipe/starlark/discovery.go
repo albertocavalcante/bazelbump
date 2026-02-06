@@ -12,6 +12,12 @@ import (
 	"strings"
 )
 
+// Pre-compiled regex patterns for recipe metadata extraction.
+var (
+	descriptionPattern = regexp.MustCompile(`description\s*=\s*"([^"]*)"`)
+	versionMetaPattern = regexp.MustCompile(`version\s*=\s*"([^"]*)"`)
+)
+
 // DiscoveredRecipe represents a recipe found during discovery.
 type DiscoveredRecipe struct {
 	// Name is the recipe name (filename without .star extension)
@@ -252,14 +258,12 @@ func extractRecipeMetadata(path string) (description, version string) {
 	text := content.String()
 
 	// Extract description
-	descPattern := regexp.MustCompile(`description\s*=\s*"([^"]*)"`)
-	if match := descPattern.FindStringSubmatch(text); len(match) > 1 {
+	if match := descriptionPattern.FindStringSubmatch(text); len(match) > 1 {
 		description = match[1]
 	}
 
 	// Extract version
-	versionPattern := regexp.MustCompile(`version\s*=\s*"([^"]*)"`)
-	if match := versionPattern.FindStringSubmatch(text); len(match) > 1 {
+	if match := versionMetaPattern.FindStringSubmatch(text); len(match) > 1 {
 		version = match[1]
 	}
 
