@@ -43,6 +43,9 @@ import (
 	"go.starlark.net/starlarkstruct"
 )
 
+// quotedWordPattern matches quoted words like "symbol" in load statements.
+var quotedWordPattern = regexp.MustCompile(`"(\w+)"`)
+
 // Executor runs Starlark recipes through the three-phase execution model.
 type Executor struct {
 	interpreter *Interpreter
@@ -761,8 +764,7 @@ func (e *Executor) scanFile(path string, patterns []*regexp.Regexp) ([]Match, er
 		if strings.Contains(line, "load(") {
 			if idx := strings.Index(line, ","); idx != -1 {
 				rest := line[idx+1:]
-				re := regexp.MustCompile(`"(\w+)"`)
-				symbolMatches := re.FindAllStringSubmatch(rest, -1)
+				symbolMatches := quotedWordPattern.FindAllStringSubmatch(rest, -1)
 				for _, m := range symbolMatches {
 					loadedRules[m[1]] = true
 				}

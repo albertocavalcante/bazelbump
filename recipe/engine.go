@@ -23,6 +23,9 @@ const (
 	defaultVerifyTimeout = 5 * time.Minute
 )
 
+// quotedWordPattern matches quoted words like "symbol" in load statements.
+var quotedWordPattern = regexp.MustCompile(`"(\w+)"`)
+
 // Engine executes recipes.
 type Engine struct {
 	recipes map[string]*Recipe
@@ -259,9 +262,7 @@ func scanFileForRules(path string, patterns []*regexp.Regexp) ([]DetectedRule, e
 			// Simple pattern: load("...", "symbol1", "symbol2")
 			if idx := strings.Index(line, ","); idx != -1 {
 				rest := line[idx+1:]
-				// Extract quoted strings
-				re := regexp.MustCompile(`"(\w+)"`)
-				matches := re.FindAllStringSubmatch(rest, -1)
+				matches := quotedWordPattern.FindAllStringSubmatch(rest, -1)
 				for _, m := range matches {
 					loadedRules[m[1]] = true
 				}

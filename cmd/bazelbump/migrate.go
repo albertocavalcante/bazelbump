@@ -13,6 +13,9 @@ import (
 	"strings"
 )
 
+// incompatibleFlagPattern matches --incompatible_* flags in migrate output.
+var incompatibleFlagPattern = regexp.MustCompile(`^\s*(--incompatible_\w+)`)
+
 func runMigrate(args []string) error {
 	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 
@@ -139,8 +142,6 @@ func parseMigrateOutput(output string) *MigrateResult {
 	inSucceeded := false
 	inFailed := false
 
-	flagRe := regexp.MustCompile(`^\s*(--incompatible_\w+)`)
-
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -160,7 +161,7 @@ func parseMigrateOutput(output string) *MigrateResult {
 			continue
 		}
 
-		if matches := flagRe.FindStringSubmatch(line); matches != nil {
+		if matches := incompatibleFlagPattern.FindStringSubmatch(line); matches != nil {
 			flag := matches[1]
 			if inSucceeded {
 				result.PassingFlags = append(result.PassingFlags, flag)
